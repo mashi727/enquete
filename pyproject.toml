@@ -2,6 +2,8 @@
 name = "enquete"
 version = "0.1.0"
 description = "アンケート読み込み支援アプリ(3ペイン: サムネイル / PDF表示 / 入力結果)"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "numpy>=2.4.6",

@@ -65,7 +65,9 @@ uv run python -m enquete
 
 ## ライセンス
 
-未定。利用方法に応じて別途設定予定です。
+[MIT License](LICENSE)。
+
+なお依存ライブラリは各自のライセンスに従います（PySide6 は LGPL、pypdfium2 は BSD など）。
 
 ## 備考
 
