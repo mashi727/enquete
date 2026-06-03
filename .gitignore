@@ -1,0 +1,35 @@
+# ===== ユーザーデータ（個人情報を含むため公開しない） =====
+# 実アンケートのPDF・回答JSON・処理ログ・大容量素材。ローカルにのみ保持する。
+resources/
+
+# 開発作業ログ（引き継ぎ用メモ）。リポジトリには含めない。
+worklog/
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyright/
+
+# ===== 仮想環境 =====
+.venv/
+venv/
+env/
+
+# ===== OS / エディタ =====
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# ===== その他生成物 =====
+*.log
+*.bak.pdf
+*.deskew_tmp.pdf
