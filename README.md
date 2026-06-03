@@ -20,13 +20,14 @@
 
 macOS / Windows 向けのスタンドアロン版を配布します。
 
-- **リリース**: [Releases](https://github.com/mashi727/enquete/releases) から
-  `enquete-macos.zip` / `enquete-windows.zip` を取得（`v*` タグごとに自動添付）。
+- **リリース**: [Releases](https://github.com/mashi727/enquete/releases) から取得（`v*` タグごとに自動添付）。
+  - **Windows**: `enquete-windows.exe`（単一ファイル。ダウンロードしてダブルクリックで起動）
+  - **macOS**: `enquete-macos.zip`（展開して `enquete.app` を起動）
 - **最新ビルド**: GitHub の *Actions* → *Build binaries* の成果物（Artifacts）からも取得可能。
 
 > ⚠️ バイナリは**コード署名・公証なし**です。
 > - macOS: 初回は Finder で右クリック →「開く」、または `xattr -dr com.apple.quarantine enquete.app`
-> - Windows: SmartScreen の「詳細情報」→「実行」
+> - Windows: SmartScreen の「詳細情報」→「実行」（単一 exe は初回起動の自己展開でやや時間がかかります）
 >
 > ビルド方法・同梱方針は [`docs/build.md`](docs/build.md) を参照してください。
 
@@ -74,11 +75,17 @@ uv run python -m enquete
 
 1. **① 開く** — アンケート PDF を開く（サムネイル領域への D&D も可）
 2. **② フォーム ▾** — 台紙からフォームを作成 / 既存フォームを読込 / 編集
-3. **傾き補正モード** — 必要に応じて傾きを補正（確定＝上書き保存、Esc＝キャンセル）
+3. **傾き補正モード** — トグル式。入る→グリッドを見ながらドラッグで回転→もう一度押すと
+   保存（PDF 上書き・原本は `.bak` へ）。`Esc` で破棄してキャンセル
 4. **③ 電子化** — 全ページを一括で自動判定・OCR
 5. **◀ / ▶ ・ ✓ 確認済みにする** — ページを送りながら結果を校正・確認
 
-校正結果は編集の都度、PDF と同名・同ディレクトリの `*.json`（サイドカー）へ自動保存されます。
+> アクションバーの「**モデル: …**」ドロップダウンで OCR エンジン（自動 / Apple Vision /
+> Chrome screen-ai / Windows 標準）を切り替えられます（ツール → OCRエンジンと同期）。
+
+校正結果は編集の都度、PDF と同名・同ディレクトリの `*.json`（サイドカー）へ
+**自動保存**されます（明示的な保存操作は不要）。傾き補正だけは破壊的操作のため、
+上記のとおりモードを抜けたときに確定保存します。
 
 ## ライセンス
 

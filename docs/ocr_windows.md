@@ -1,15 +1,19 @@
 # Windows / Linux での OCR（Chrome screen-ai / locro）
 
-enquete の OCR（スキャンからのフォーム作成・将来の手書き領域読取）は、
-プラットフォームごとに別バックエンドへ自動で切り替わる。
+enquete の OCR（スキャンからのフォーム作成・自由記述欄の読取）は、
+実行 OS で利用できるバックエンドの中から選択する。
 
-| OS | バックエンド | 既定の入手性 |
+| OS | 既定で使えるもの | 追加導入で使えるもの |
 |----|-------------|-------------|
-| macOS | Apple Vision（`ocrmac`） | 標準依存に含まれ、追加作業なしで動作 |
-| Windows / Linux | Chrome screen-ai（`locro`） | 下記セットアップが必要 |
+| macOS | Apple Vision（`ocrmac`・標準依存） | Chrome screen-ai（`locro`） |
+| Windows | Windows 標準 OCR（`winsdk`・`winocr` extra） | Chrome screen-ai（`locro`・下記） |
+| Linux | （なし） | Chrome screen-ai（`locro`・下記） |
 
-バックエンドの選択は `enquete.ocr.get_default_backend()` が行い、
-利用可能な最優先のものを返す（mac では文字単位 box が取れる Vision を優先）。
+利用可能なバックエンドは `enquete.ocr.backend_choices()` が OS で絞り込んで返し、
+選択は `enquete.ocr.get_backend(preference)` で行う（`preference="auto"` のとき
+利用可能な最優先のものを返す。mac では文字単位 box が取れる Vision を優先）。
+アプリ上は「ツール → OCRエンジン」または下段アクションバーの「モデル」ドロップダウンで
+切り替える。
 
 ## なぜ追加セットアップが要るのか
 
@@ -39,8 +43,9 @@ uv run locro download
 uv run locro ocr path/to/sample.png --text
 ```
 
-セットアップ後にアプリを起動すれば、スキャン PDF に対する
-「ツール → フォーム作成」が screen-ai 経由で動作する。
+セットアップ後にアプリを起動すれば、「ツール → OCRエンジン」または下段アクションバーの
+「モデル」ドロップダウンで screen-ai を選べるようになり、スキャン PDF からのフォーム作成・
+自由記述欄の OCR が screen-ai 経由で動作する。
 
 ## 配布バイナリ（exe / .app）で screen-ai を有効化する
 
