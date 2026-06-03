@@ -81,11 +81,7 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    [],
-    exclude_binaries=True,
+_exe_common = dict(
     name="enquete",
     debug=False,
     bootloader_ignore_signals=False,
@@ -100,28 +96,42 @@ exe = EXE(
     icon=exe_icon,
 )
 
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=False,
-    upx_exclude=[],
-    name="enquete",
-)
-
-if sys.platform == "darwin":
-    app = BUNDLE(
-        coll,
-        name="enquete.app",
-        icon="assets/icon.icns",
-        bundle_identifier="com.LeonOrchestra.enquete",
-        info_plist={
-            "CFBundleName": "enquete",
-            "CFBundleDisplayName": "enquete",
-            "CFBundleShortVersionString": "0.1.0",
-            "CFBundleVersion": "0.1.0",
-            "NSHighResolutionCapable": True,
-            "LSMinimumSystemVersion": "12.0",
-        },
+if sys.platform == "win32":
+    # Windows: onefile。単一の enquete.exe に全依存を埋め込む(ダブルクリックで起動)。
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        [],
+        exclude_binaries=False,
+        runtime_tmpdir=None,
+        **_exe_common,
     )
+else:
+    # macOS: onedir + .app バンドル。
+    exe = EXE(pyz, a.scripts, [], exclude_binaries=True, **_exe_common)
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.datas,
+        strip=False,
+        upx=False,
+        upx_exclude=[],
+        name="enquete",
+    )
+    if sys.platform == "darwin":
+        app = BUNDLE(
+            coll,
+            name="enquete.app",
+            icon="assets/icon.icns",
+            bundle_identifier="com.LeonOrchestra.enquete",
+            info_plist={
+                "CFBundleName": "enquete",
+                "CFBundleDisplayName": "enquete",
+                "CFBundleShortVersionString": "0.1.0",
+                "CFBundleVersion": "0.1.0",
+                "NSHighResolutionCapable": True,
+                "LSMinimumSystemVersion": "12.0",
+            },
+        )

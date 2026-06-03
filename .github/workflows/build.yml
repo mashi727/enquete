@@ -22,7 +22,7 @@ jobs:
           - os: macos-latest
             asset: enquete-macos.zip
           - os: windows-latest
-            asset: enquete-windows.zip
+            asset: enquete-windows.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -56,14 +56,15 @@ jobs:
         if: runner.os == 'Windows'
         run: .venv\Scripts\pyinstaller.exe enquete.spec --noconfirm
 
-      # 配布用に圧縮。macOS は .app を ditto で(リソースフォーク保持)。
+      # macOS: .app を ditto で zip 化(リソースフォーク保持)。
       - name: Package (macOS)
         if: runner.os == 'macOS'
         run: ditto -c -k --keepParent "dist/enquete.app" "enquete-macos.zip"
 
+      # Windows: onefile の単一 exe をそのまま配布名にリネーム。
       - name: Package (Windows)
         if: runner.os == 'Windows'
-        run: Compress-Archive -Path "dist/enquete" -DestinationPath "enquete-windows.zip"
+        run: Copy-Item "dist/enquete.exe" "enquete-windows.exe"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
