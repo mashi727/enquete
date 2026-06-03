@@ -27,6 +27,10 @@ screenai = [
 winocr = [
     "winsdk ; sys_platform == 'win32'",
 ]
+# スタンドアロンバイナリのビルド(PyInstaller)。enquete.spec を使用。
+build = [
+    "pyinstaller>=6.6",
+]
 
 # locro を Git 直接参照(direct reference)で指定するため許可フラグが必要。
 [tool.hatch.metadata]

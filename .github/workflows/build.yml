@@ -1,0 +1,79 @@
+name: Build binaries
+
+# 手動実行(workflow_dispatch)と、v* タグ push 時にビルド。
+# タグ push のときは生成物を GitHub Release に添付する。
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write  # タグ時に Release へ添付するため
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            asset: enquete-macos.zip
+          - os: windows-latest
+            asset: enquete-windows.zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Create venv (Python 3.12)
+        run: uv venv --python 3.12
+
+      # 依存をインストール(lock 非依存・pyproject から直接解決)。
+      # macOS は ocrmac(Apple Vision)が base 依存に含まれる。
+      # Windows は winocr extra(Windows 標準 OCR)も入れる。
+      - name: Install deps (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          uv pip install -e .
+          uv pip install pyinstaller
+
+      - name: Install deps (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          uv pip install -e ".[winocr]"
+          uv pip install pyinstaller
+
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: .venv/bin/pyinstaller enquete.spec --noconfirm
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: .venv\Scripts\pyinstaller.exe enquete.spec --noconfirm
+
+      # 配布用に圧縮。macOS は .app を ditto で(リソースフォーク保持)。
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: ditto -c -k --keepParent "dist/enquete.app" "enquete-macos.zip"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path "dist/enquete" -DestinationPath "enquete-windows.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+      - name: Attach to Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset }}

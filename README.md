@@ -16,6 +16,20 @@
 - **分割 / マージ**: 手分け作業のための PDF 分割と結果の統合
 - **ドラッグ＆ドロップ**: サムネイル領域へ PDF を投入してページ挿入・別名保存
 
+## ダウンロード（ビルド済みバイナリ）
+
+macOS / Windows 向けのスタンドアロン版を配布します。
+
+- **リリース**: [Releases](https://github.com/mashi727/enquete/releases) から
+  `enquete-macos.zip` / `enquete-windows.zip` を取得（`v*` タグごとに自動添付）。
+- **最新ビルド**: GitHub の *Actions* → *Build binaries* の成果物（Artifacts）からも取得可能。
+
+> ⚠️ バイナリは**コード署名・公証なし**です。
+> - macOS: 初回は Finder で右クリック →「開く」、または `xattr -dr com.apple.quarantine enquete.app`
+> - Windows: SmartScreen の「詳細情報」→「実行」
+>
+> ビルド方法・同梱方針は [`docs/build.md`](docs/build.md) を参照してください。
+
 ## 動作環境
 
 - Python **3.12 以上**
