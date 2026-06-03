@@ -119,6 +119,26 @@ def _get_engine() -> object | None:
     return _ENGINE
 
 
+def setup_component(target_dir: "object | None" = None) -> str:
+    """screen-ai コンポーネント(DLL＋モデル)を取得してローカルに配置する。
+
+    locro の download_component() を呼ぶ。取得元は自動フォールバック
+    (インストール済み Chrome → Dropbox zip → Google サーバの順)。
+    取得先(バージョンディレクトリ)のパス文字列を返す。
+
+    取得に成功したら、まだエンジン未生成ならエンジン構築フラグをリセットし、
+    次回 available()/初回OCR で新しいコンポーネントを使えるようにする。
+    locro 未導入(同梱されていない)・取得失敗時は例外を送出する。
+    """
+    from locro import download_component  # type: ignore
+
+    path = download_component(target_dir)
+    global _ENGINE_TRIED
+    if _ENGINE is None:
+        _ENGINE_TRIED = False  # 取得後に再構築できるよう未試行へ戻す
+    return str(path)
+
+
 class ScreenAiBackend:
     name = "Chrome screen-ai (locro)"
 

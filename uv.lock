@@ -49,6 +49,7 @@ dependencies = [
     { name = "numpy" },
     { name = "ocrmac", marker = "sys_platform == 'darwin'" },
     { name = "opencv-python-headless" },
+    { name = "pillow" },
     { name = "pypdfium2" },
     { name = "pyside6" },
 ]
@@ -59,7 +60,6 @@ build = [
 ]
 screenai = [
     { name = "locro" },
-    { name = "pillow" },
 ]
 winocr = [
     { name = "winsdk", marker = "sys_platform == 'win32'" },
@@ -71,7 +71,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.4.6" },
     { name = "ocrmac", marker = "sys_platform == 'darwin'", specifier = ">=1.0.1" },
     { name = "opencv-python-headless", specifier = ">=4.13.0.92" },
-    { name = "pillow", marker = "extra == 'screenai'", specifier = ">=10" },
+    { name = "pillow", specifier = ">=10" },
     { name = "pyinstaller", marker = "extra == 'build'", specifier = ">=6.6" },
     { name = "pypdfium2", specifier = ">=5.8.0" },
     { name = "pyside6", specifier = ">=6.8" },

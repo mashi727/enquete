@@ -20,7 +20,9 @@ from PySide6.QtCore import (
     QSettings,
     QSize,
     Qt,
+    QThread,
     QTimer,
+    Signal,
 )
 from PySide6.QtGui import (
     QAction,
@@ -79,6 +81,7 @@ from enquete.formgen_ocr import generate_survey_from_scans
 from enquete.merge_dialog import MergeDialog, SplitDialog
 from enquete.ocr import (
     BACKEND_AUTO,
+    BACKEND_SCREENAI,
     backend_choices,
     get_backend,
 )
@@ -125,6 +128,25 @@ FIT_HEIGHT = "height"
 DEFAULT_FORM_FONT_PT = 14
 MIN_FORM_FONT_PT = 8
 MAX_FORM_FONT_PT = 28
+
+
+class _ScreenAiSetupThread(QThread):
+    """screen-ai コンポーネント取得をバックグラウンドで実行するワーカー。
+
+    locro.download_component() は Chrome コピー/zip 展開/サーバDLを行い時間を
+    要するため、UI スレッドを塞がないよう別スレッドで走らせ、結果を done で返す。
+    """
+
+    done = Signal(bool, str)  # (成功か, 成功時はパス / 失敗時はエラーメッセージ)
+
+    def run(self) -> None:  # QThread のエントリ(別スレッドで実行)
+        try:
+            from enquete.ocr.screenai_backend import setup_component
+
+            path = setup_component()
+            self.done.emit(True, path)
+        except Exception as exc:  # noqa: BLE001  取得失敗を UI へ伝える
+            self.done.emit(False, str(exc))
 
 
 def load_main_window() -> QMainWindow:
@@ -247,6 +269,9 @@ class MainWindowController(QObject):
         # OCRバックエンドの選好(auto/ocrmac/screenai)。ツールメニューで選択・永続化。
         self._ocr_pref = BACKEND_AUTO
         self._ocr_actions: dict[str, QAction] = {}
+        # screen-ai コンポーネント取得(バックグラウンド)用のワーカー/進捗ダイアログ。
+        self._screenai_thread: _ScreenAiSetupThread | None = None
+        self._screenai_progress: QProgressDialog | None = None
 
         # ウィンドウ状態の保存先(組織名/アプリ名は __main__ で設定済み)。
         # 保存は __main__ が QApplication.aboutToQuit に save_window_state を
@@ -372,6 +397,11 @@ class MainWindowController(QObject):
         # 検出設定の前にサブメニューを差し込む
         tools.addSeparator()
         tools.addMenu(submenu)
+        # screen-ai(Chrome の高精度OCR)の有効化アクション
+        act_setup = QAction("screen-ai OCR を有効化（コンポーネント取得）…", self.window)
+        act_setup.triggered.connect(self.enable_screenai)
+        submenu.addSeparator()
+        submenu.addAction(act_setup)
 
     def _refresh_ocr_menu(self) -> None:
         """各エンジンの利用可否をラベル末尾に反映する。"""
@@ -416,6 +446,87 @@ class MainWindowController(QObject):
             self._model_btn.setText(f"モデル: {backend.name} ▾")
         else:
             self._model_btn.setText("モデル: 利用不可 ▾")
+
+    # ----------------------------------------- screen-ai(Chrome高精度OCR)の有効化
+    def enable_screenai(self) -> None:
+        """screen-ai のコンポーネントを取得して OCR エンジンを screen-ai に切替。
+
+        DLL/モデルは非再配布のため exe に同梱せず、利用者環境(Chrome/Dropbox/
+        Google サーバ)から取得する。取得は時間を要するので別スレッドで実行する。
+        """
+        import importlib.util
+
+        if importlib.util.find_spec("locro") is None:
+            QMessageBox.information(
+                self.window,
+                "screen-ai OCR",
+                "このビルドには screen-ai(locro)が含まれていないため有効化できません。",
+            )
+            return
+        # 既に取得済みなら取得をスキップして切替のみ
+        if get_backend(BACKEND_SCREENAI) is not None:
+            self._set_ocr_pref(BACKEND_SCREENAI)
+            self._refresh_ocr_menu()
+            QMessageBox.information(
+                self.window,
+                "screen-ai OCR",
+                "screen-ai は既に利用可能です。OCR エンジンを screen-ai に切り替えました。",
+            )
+            return
+        if self._screenai_thread is not None:
+            return  # 取得処理が進行中
+        ret = QMessageBox.question(
+            self.window,
+            "screen-ai OCR を有効化",
+            "Chrome の高精度 OCR コンポーネント(ライブラリ＋モデル)を取得します。\n\n"
+            "・インストール済み Chrome があればそこからコピー\n"
+            "・無ければ Dropbox の zip / Google サーバからの取得を試みます\n\n"
+            "数十MB のダウンロードが発生する場合があります。続行しますか？",
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+        dlg = QProgressDialog(
+            "screen-ai コンポーネントを取得中…\n(完了まで数分かかる場合があります)",
+            "", 0, 0, self.window,
+        )
+        dlg.setWindowTitle("screen-ai OCR を有効化")
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setCancelButton(None)  # 取得処理は中断できないため無効
+        dlg.setMinimumDuration(0)
+        self._center_dialog(dlg)
+        dlg.show()
+        self._screenai_progress = dlg
+        thread = _ScreenAiSetupThread(self)
+        thread.done.connect(self._on_screenai_setup_done)
+        self._screenai_thread = thread
+        thread.start()
+
+    def _on_screenai_setup_done(self, ok: bool, info: str) -> None:
+        """screen-ai 取得スレッドの完了処理(UI スレッドで実行される)。"""
+        if self._screenai_progress is not None:
+            self._screenai_progress.close()
+            self._screenai_progress = None
+        self._screenai_thread = None
+        if ok:
+            self._set_ocr_pref(BACKEND_SCREENAI)
+            self._refresh_ocr_menu()
+            QMessageBox.information(
+                self.window,
+                "screen-ai OCR",
+                "有効化しました。以後、電子化の OCR に screen-ai を使用します。\n\n"
+                f"コンポーネント: {info}",
+            )
+        else:
+            QMessageBox.warning(
+                self.window,
+                "screen-ai OCR",
+                "コンポーネントの取得に失敗しました。\n\n"
+                f"詳細: {info}\n\n"
+                "対処:\n"
+                "・Google Chrome をインストールし、chrome://components で\n"
+                "  「Optimization Guide On Device Model / Screen AI」を更新してから\n"
+                "  再実行してください。",
+            )
 
     # ------------------------------------------------- 操作フローのアクションバー
     def _build_action_bar(self) -> None:

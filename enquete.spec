@@ -44,9 +44,23 @@ elif sys.platform == "win32":
     # Windows 標準 OCR(任意。未導入なら編集モードのみで起動)
     _collect("winsdk")
 
+# locro(MIT・screen-ai ラッパ)は同梱する。外部依存は PIL のみで軽量。
+# 実行時に Chrome/Dropbox/サーバから DLL・モデル(非再配布)を取得して使う。
+# cli.py だけが typer を使う(本アプリは未使用)ので、それは除外する。
+hiddenimports += [
+    "locro",
+    "locro._dll",
+    "locro._download",
+    "locro._platform",
+    "locro._protobuf",
+    "locro.models",
+    "locro.ocr",
+]
+
 # 同梱しない/不要な重量級パッケージ
 excludes = [
-    "locro",          # screen-ai ラッパ(モデル非再配布)
+    "locro.cli",      # typer 依存の CLI(本アプリは未使用)
+    "typer",
     "fitz",           # PyMuPDF
     "pymupdf",        # PyMuPDF(AGPL)
     "tkinter",
@@ -129,8 +143,8 @@ else:
             info_plist={
                 "CFBundleName": "enquete",
                 "CFBundleDisplayName": "enquete",
-                "CFBundleShortVersionString": "0.1.0",
-                "CFBundleVersion": "0.1.0",
+                "CFBundleShortVersionString": "0.1.1",
+                "CFBundleVersion": "0.1.1",
                 "NSHighResolutionCapable": True,
                 "LSMinimumSystemVersion": "12.0",
             },

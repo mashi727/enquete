@@ -42,6 +42,23 @@ uv run locro ocr path/to/sample.png --text
 セットアップ後にアプリを起動すれば、スキャン PDF に対する
 「ツール → フォーム作成」が screen-ai 経由で動作する。
 
+## 配布バイナリ（exe / .app）で screen-ai を有効化する
+
+スタンドアロン配布版には **`locro`（MIT のラッパ）は同梱**していますが、
+**screen-ai のライブラリ本体・モデル（非再配布）は含めていません**。
+アプリ内から一度だけ取得して有効化します（ソース環境・`uv`/`locro` コマンド不要）。
+
+1. アプリのメニュー **ツール → OCRエンジン → 「screen-ai OCR を有効化（コンポーネント取得）…」**
+2. 確認のうえ実行すると、バックグラウンドで以下を**自動フォールバック**で取得します:
+   - インストール済み **Chrome** の screen_ai コンポーネントをコピー
+   - 無ければ **Dropbox** の zip（`<Dropbox>/bin/screen-ai-<platform>.zip`）
+   - 無ければ **Google サーバ**から取得（サーバ制限で失敗する場合あり）
+3. 取得に成功すると `%LOCALAPPDATA%\locro`（Windows）/ `~/Library/Application Support/locro`（macOS）
+   へ配置され、OCRエンジンが自動的に screen-ai に切り替わります。
+
+> Chrome 経由が最も確実です。事前に Chrome の `chrome://components` で
+> 「Screen AI」コンポーネントを更新しておくと、ローカルコピーで取得できます。
+
 ## 既知の制約
 
 - screen-ai は **平文テキストには高精度だが、表・フォームのような複雑な

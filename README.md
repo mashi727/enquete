@@ -57,7 +57,10 @@ pip install -e .
 
 > **screen-ai について**: `locro` は PyPI 未公開のソース配布で、エンジン本体／モデルは
 > 非再配布です。導入後に `locro download` で手元の Chrome からコピーする必要があります。
-> 詳細は [`docs/ocr_windows.md`](docs/ocr_windows.md) を参照してください。
+> 配布バイナリ（exe / .app）では `locro` を同梱しており、メニューの
+> **ツール → OCRエンジン → 「screen-ai OCR を有効化…」** から一度だけ取得すれば
+> 高精度な screen-ai OCR を利用できます。詳細は
+> [`docs/ocr_windows.md`](docs/ocr_windows.md) を参照してください。
 
 ## 実行
 
