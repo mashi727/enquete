@@ -3,10 +3,15 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from enquete.main_window import DEFAULT_FORM_FONT_PT, MainWindowController, load_main_window
+
+# ウィンドウ/Dock/タスクバー用アイコン(.ui と同じ ui/ に同梱)
+ICON_PATH = Path(__file__).resolve().parent / "ui" / "icon.png"
 
 
 def main() -> int:
@@ -15,6 +20,8 @@ def main() -> int:
     app.setOrganizationName("LeonOrchestra")
     app.setOrganizationDomain("leon-orchestra.example")
     app.setApplicationName("enquete")
+    if ICON_PATH.exists():
+        app.setWindowIcon(QIcon(str(ICON_PATH)))
     # アプリ全体(メニュー・ツールバー・ダイアログ等)の既定フォントを 14pt に統一
     font = app.font()
     font.setPointSize(DEFAULT_FORM_FONT_PT)

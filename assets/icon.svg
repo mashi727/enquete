@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3b82f6"/>
+      <stop offset="1" stop-color="#2563eb"/>
+    </linearGradient>
+    <filter id="sheetShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="24" flood-color="#1e3a8a" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <!-- 角丸の背景(青) -->
+  <rect x="0" y="0" width="1024" height="1024" rx="232" fill="url(#bg)"/>
+
+  <!-- クリップボードの用紙(白) -->
+  <rect x="246" y="196" width="532" height="664" rx="44" fill="#ffffff" filter="url(#sheetShadow)"/>
+
+  <!-- 上部のクリップ -->
+  <rect x="430" y="150" width="164" height="104" rx="34" fill="#cbd5e1"/>
+  <rect x="466" y="138" width="92" height="74" rx="30" fill="#93a3b8"/>
+
+  <!-- 行1: チェック済み(緑) -->
+  <rect x="316" y="350" width="92" height="92" rx="22" fill="#eff6ff" stroke="#2563eb" stroke-width="14"/>
+  <path d="M 338 398 L 358 420 L 392 372" fill="none" stroke="#22c55e" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="440" y="378" width="262" height="36" rx="18" fill="#cbd5e1"/>
+
+  <!-- 行2: チェック済み(緑) -->
+  <rect x="316" y="494" width="92" height="92" rx="22" fill="#eff6ff" stroke="#2563eb" stroke-width="14"/>
+  <path d="M 338 542 L 358 564 L 392 516" fill="none" stroke="#22c55e" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="440" y="522" width="224" height="36" rx="18" fill="#cbd5e1"/>
+
+  <!-- 行3: 未チェック -->
+  <rect x="316" y="638" width="92" height="92" rx="22" fill="#ffffff" stroke="#94a3b8" stroke-width="14"/>
+  <rect x="440" y="666" width="262" height="36" rx="18" fill="#e2e8f0"/>
+</svg>

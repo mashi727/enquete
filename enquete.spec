@@ -13,8 +13,11 @@ import sys
 
 from PyInstaller.utils.hooks import collect_all
 
-# 実行時リソース: QUiLoader が Path(__file__).parent/"ui"/"main_window.ui" を読む。
-datas = [("src/enquete/ui/main_window.ui", "enquete/ui")]
+# 実行時リソース: QUiLoader が読む .ui と、ウィンドウ/Dock 用アイコン(同 ui/)。
+datas = [
+    ("src/enquete/ui/main_window.ui", "enquete/ui"),
+    ("src/enquete/ui/icon.png", "enquete/ui"),
+]
 binaries = []
 hiddenimports = []
 
@@ -60,6 +63,9 @@ excludes = [
     "PySide6.QtBluetooth",
 ]
 
+# 実行ファイルのアイコン(Windows は .ico、macOS は後段の BUNDLE で .icns)
+exe_icon = "assets/icon.ico" if sys.platform == "win32" else None
+
 a = Analysis(
     ["src/enquete/__main__.py"],
     pathex=["src"],
@@ -91,6 +97,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=exe_icon,
 )
 
 coll = COLLECT(
@@ -107,7 +114,7 @@ if sys.platform == "darwin":
     app = BUNDLE(
         coll,
         name="enquete.app",
-        icon=None,
+        icon="assets/icon.icns",
         bundle_identifier="com.LeonOrchestra.enquete",
         info_plist={
             "CFBundleName": "enquete",
