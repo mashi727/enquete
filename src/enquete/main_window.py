@@ -285,6 +285,10 @@ class MainWindowController(QObject):
         self._overlay_enabled = bool(
             self._settings.value("overlay/enabled", True, type=bool)
         )
+        # インク比率の数値表示は既定 OFF(検出チューニング時のみ。視認性のため)。
+        self._overlay_ratios = bool(
+            self._settings.value("overlay/ratios", False, type=bool)
+        )
 
         # PDF 表示用シーン
         self._scene = QGraphicsScene(self)
@@ -1130,10 +1134,12 @@ class MainWindowController(QObject):
         dlg = self._settings_dialog
         if dlg is None:
             dlg = DetectionSettingsDialog(
-                self._survey.detection, self._overlay_enabled, self.window
+                self._survey.detection, self._overlay_enabled, self.window,
+                show_ratios=self._overlay_ratios,
             )
             dlg.valuesChanged.connect(self._on_detection_params_changed)
             dlg.overlayToggled.connect(self._set_overlay_enabled)
+            dlg.ratiosToggled.connect(self._set_overlay_ratios)
             self._settings_dialog = dlg
         self._center_dialog(dlg)
         dlg.show()
@@ -1313,6 +1319,11 @@ class MainWindowController(QObject):
     def _set_overlay_enabled(self, enabled: bool) -> None:
         self._overlay_enabled = enabled
         self._settings.setValue("overlay/enabled", enabled)  # 次回起動へ記憶
+        self._refresh_overlay()
+
+    def _set_overlay_ratios(self, show: bool) -> None:
+        self._overlay_ratios = show
+        self._settings.setValue("overlay/ratios", show)  # 次回起動へ記憶
         self._refresh_overlay()
 
     # ----------------------------------------------------------- persistence
@@ -1989,9 +2000,9 @@ class MainWindowController(QObject):
                 ritem = self._scene.addRect(box, pen, brush)
                 ritem.setZValue(10)
                 self._overlay_items.append(ritem)
-                # インク比率を「枠の直下」に常時一定サイズで表示。
+                # インク比率の数値表示は既定 OFF(検出チューニング時のみ)。
                 # 太字＋白文字を下に重ねた縁取りで、背景に埋もれず読めるようにする。
-                if res is not None and opt.value in res.ratios:
+                if self._overlay_ratios and res is not None and opt.value in res.ratios:
                     txt = f"{res.ratios[opt.value]:.2f}"
                     pos_x, pos_y = box.left(), box.bottom() + 1.0  # 四角の直下
                     ignore = QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations

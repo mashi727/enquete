@@ -147,16 +147,10 @@ class FormPane(QWidget):
         title.setStyleSheet("font-weight: bold;")  # サイズは親(FormPane)の指定を継承
         root.addWidget(title)
 
-        reviewed = QCheckBox()
-        reviewed.toggled.connect(self.reviewedToggled.emit)
-        self._reviewed_check = reviewed
-        root.addWidget(
-            self._wrap_control(
-                reviewed,
-                "このページを確認済みにする",
-                label_style="color: #1a7f37; font-weight: bold;",
-            )
-        )
+        # 「このページを確認済みにする」は下段アクションバーのボタンに集約したため、
+        # 右ペイン(フォーム)にはチェックボックスを置かない。set_reviewed は
+        # _reviewed_check が None でも no-op で安全に動作する。
+        self._reviewed_check = None
 
         # 自由記述があるときだけ、範囲確定時の再認識スコープを選ばせる
         if any(q.type == FREE_TEXT for q in self._survey.questions):

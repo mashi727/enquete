@@ -27,12 +27,14 @@ class DetectionSettingsDialog(QDialog):
 
     valuesChanged = Signal()
     overlayToggled = Signal(bool)
+    ratiosToggled = Signal(bool)
 
     def __init__(
         self,
         detection: CheckboxDetection,
         overlay_enabled: bool,
         parent: QWidget | None = None,
+        show_ratios: bool = False,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("検出設定")
@@ -48,6 +50,7 @@ class DetectionSettingsDialog(QDialog):
         self._use_diff = QCheckBox("差分検出を使う（先頭ページをクリーン基準に）")
         self._diff_thr = self._spin(0.0, 0.5, 0.01, 2)  # 差分: チェック判定の下限
         self._overlay = QCheckBox("ROIオーバーレイを表示")
+        self._ratios = QCheckBox("インク比率の数値を表示（検出チューニング用）")
 
         form = QFormLayout()
         form.addRow("インク閾値 (ink_threshold)", self._ink)
@@ -59,6 +62,7 @@ class DetectionSettingsDialog(QDialog):
         form.addRow("", self._use_diff)
         form.addRow("差分 チェック下限 (diff_threshold)", self._diff_thr)
         form.addRow("", self._overlay)
+        form.addRow("", self._ratios)
 
         hint = QLabel(
             "チェック漏れ→閾値を下げる / 誤検出→上げる。\n"
@@ -74,7 +78,7 @@ class DetectionSettingsDialog(QDialog):
         layout.addWidget(hint)
         layout.addWidget(buttons)
 
-        self._load_from_detection(overlay_enabled)
+        self._load_from_detection(overlay_enabled, show_ratios)
 
         for sb in (
             self._ink, self._inset, self._dark, self._scale,
@@ -83,6 +87,7 @@ class DetectionSettingsDialog(QDialog):
             sb.valueChanged.connect(self._on_value_changed)
         self._use_diff.toggled.connect(self._on_value_changed)
         self._overlay.toggled.connect(self.overlayToggled.emit)
+        self._ratios.toggled.connect(self.ratiosToggled.emit)
         buttons.rejected.connect(self.close)
 
     @staticmethod
@@ -93,7 +98,7 @@ class DetectionSettingsDialog(QDialog):
         sb.setDecimals(decimals)
         return sb
 
-    def _load_from_detection(self, overlay_enabled: bool) -> None:
+    def _load_from_detection(self, overlay_enabled: bool, show_ratios: bool = False) -> None:
         self._loading = True
         self._ink.setValue(self._detection.ink_threshold)
         self._inset.setValue(self._detection.roi_inset)
@@ -104,6 +109,7 @@ class DetectionSettingsDialog(QDialog):
         self._use_diff.setChecked(self._detection.use_diff)
         self._diff_thr.setValue(self._detection.diff_threshold)
         self._overlay.setChecked(overlay_enabled)
+        self._ratios.setChecked(show_ratios)
         self._loading = False
 
     def _on_value_changed(self, *_: object) -> None:
