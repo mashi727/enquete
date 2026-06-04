@@ -43,6 +43,11 @@ if __name__ == "__main__":
     # PySide6＋ネイティブ拡張(Vision/OpenCV 等)の解放順序により間欠的に
     # segfault(exit 139)するため、破棄を踏まず即時終了する。
     rc = main()
-    sys.stdout.flush()
-    sys.stderr.flush()
+    # GUI(windowed)ビルドでは sys.stdout/stderr が None のことがあるため安全に flush。
+    for _stream in (sys.stdout, sys.stderr):
+        if _stream is not None:
+            try:
+                _stream.flush()
+            except Exception:  # noqa: BLE001  終了直前なので失敗は無視
+                pass
     os._exit(rc)

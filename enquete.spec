@@ -143,8 +143,8 @@ else:
             info_plist={
                 "CFBundleName": "enquete",
                 "CFBundleDisplayName": "enquete",
-                "CFBundleShortVersionString": "0.1.1",
-                "CFBundleVersion": "0.1.1",
+                "CFBundleShortVersionString": "0.1.2",
+                "CFBundleVersion": "0.1.2",
                 "NSHighResolutionCapable": True,
                 "LSMinimumSystemVersion": "12.0",
             },

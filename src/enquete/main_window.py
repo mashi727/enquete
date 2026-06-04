@@ -255,7 +255,8 @@ class MainWindowController(QObject):
 
         # 検出結果・ROIオーバーレイ・設定ダイアログの状態
         self._last_results: dict[str, QuestionResult] = {}
-        self._overlay_enabled = False
+        # ROIオーバーレイは既定で表示(QSettings 未設定時の初期値)。下で設定から復元。
+        self._overlay_enabled = True
         self._overlay_items: list[QGraphicsItem] = []
         self._settings_dialog: DetectionSettingsDialog | None = None
         self._editor_dialog: FormEditorDialog | None = None
@@ -278,6 +279,10 @@ class MainWindowController(QObject):
         # 接続して行う(破棄中の Close イベントを拾う方式より堅牢)。
         self._settings = QSettings()
         self._ocr_pref = str(self._settings.value("ocr/backend", BACKEND_AUTO))
+        # ROIオーバーレイ表示は既定 ON。ユーザーが切り替えたら記憶する。
+        self._overlay_enabled = bool(
+            self._settings.value("overlay/enabled", True, type=bool)
+        )
 
         # PDF 表示用シーン
         self._scene = QGraphicsScene(self)
@@ -1305,6 +1310,7 @@ class MainWindowController(QObject):
 
     def _set_overlay_enabled(self, enabled: bool) -> None:
         self._overlay_enabled = enabled
+        self._settings.setValue("overlay/enabled", enabled)  # 次回起動へ記憶
         self._refresh_overlay()
 
     # ----------------------------------------------------------- persistence
@@ -1942,19 +1948,41 @@ class MainWindowController(QObject):
                 checked = res is not None and opt.value in res.checked
                 pen = QPen(red if checked else gray)
                 pen.setCosmetic(True)  # ズームに依らず一定の線幅
-                pen.setWidthF(1.5 if checked else 0.8)
+                pen.setWidthF(3.2 if checked else 1.8)  # 太め(視認性優先)
                 ritem = self._scene.addRect(box, pen)
                 ritem.setZValue(10)
                 self._overlay_items.append(ritem)
-                # インク比率を枠右に常時一定サイズで表示
+                # インク比率を「枠の直下」に常時一定サイズで表示。
+                # 太字＋白文字を下に重ねた縁取りで、背景に埋もれず読めるようにする。
                 if res is not None and opt.value in res.ratios:
-                    label = self._scene.addSimpleText(f"{res.ratios[opt.value]:.2f}")
+                    txt = f"{res.ratios[opt.value]:.2f}"
+                    pos_x, pos_y = box.left(), box.bottom() + 1.0  # 四角の直下
+                    ignore = QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations
+                    # 白い縁取り(下層): 太い白ペン＋白塗りで光彩のように見せる
+                    halo = self._scene.addSimpleText(txt)
+                    hfont = halo.font()
+                    hfont.setBold(True)
+                    hfont.setPointSizeF(hfont.pointSizeF() + 1.0)
+                    halo.setFont(hfont)
+                    hpen = QPen(QColor(255, 255, 255, 235))
+                    hpen.setWidthF(3.0)
+                    hpen.setCosmetic(True)
+                    halo.setPen(hpen)
+                    halo.setBrush(QColor(255, 255, 255, 235))
+                    halo.setFlag(ignore)
+                    halo.setZValue(10.9)
+                    halo.setPos(pos_x, pos_y)
+                    self._overlay_items.append(halo)
+                    # 本体(上層): 検出色の太字数字(縁取り無し)
+                    label = self._scene.addSimpleText(txt)
+                    lfont = label.font()
+                    lfont.setBold(True)
+                    lfont.setPointSizeF(lfont.pointSizeF() + 1.0)
+                    label.setFont(lfont)
                     label.setBrush(red if checked else gray)
-                    label.setFlag(
-                        QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations
-                    )
+                    label.setFlag(ignore)
                     label.setZValue(11)
-                    label.setPos(box.right() + 1.0, box.top() - 1.0)
+                    label.setPos(pos_x, pos_y)
                     self._overlay_items.append(label)
         # 傾き補正モード中はオーバーレイもページと一緒に回転させる
         if self._skew_mode:

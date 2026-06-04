@@ -33,3 +33,6 @@ env/
 *.log
 *.bak.pdf
 *.deskew_tmp.pdf
+
+# 対話エクスポート(LuaLaTeX 生成物・個人的アーティファクト)
+dialogue_export/
