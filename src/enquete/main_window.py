@@ -258,6 +258,8 @@ class MainWindowController(QObject):
         # ROIオーバーレイは既定で表示(QSettings 未設定時の初期値)。下で設定から復元。
         self._overlay_enabled = True
         self._overlay_items: list[QGraphicsItem] = []
+        # 直近にオーバーレイへ描いた選択状態(自由記述入力での無駄な再描画を抑止)
+        self._overlay_selection_cache: dict[str, set[str]] = {}
         self._settings_dialog: DetectionSettingsDialog | None = None
         self._editor_dialog: FormEditorDialog | None = None
         self._highlight_item: QGraphicsItem | None = None
@@ -1432,6 +1434,9 @@ class MainWindowController(QObject):
         self._capture_current_page()
         if self._doc_store is not None:
             self._autosave_timer.start()  # 連続入力をまとめて書込(500ms)
+        # 選択が変わった時だけオーバーレイを更新(自由記述のキー入力では再描画しない)
+        if self._overlay_enabled and self._current_selection() != self._overlay_selection_cache:
+            self._refresh_overlay()
 
     def _on_reviewed_toggled(self, reviewed: bool) -> None:
         """フォームの確認済みチェック操作 → 記録・ボタン同期。"""
@@ -1909,12 +1914,36 @@ class MainWindowController(QObject):
                 msg += f"（確認済み {skipped} ページは除外）"
             sb.showMessage(msg, 6000)
 
+    def _current_selection(self) -> dict[str, set[str]]:
+        """現在の校正値(フォーム状態)を 設問id -> 選択値集合 で返す。
+
+        手修正(フォーム操作・PDFダブルクリック)を反映した「いま選択済みとして
+        カウントされている」値。フォーム未構築なら空(=検出結果へフォールバック)。
+        """
+        out: dict[str, set[str]] = {}
+        if self.form_pane is None:
+            return out
+        try:
+            results = self.form_pane.get_results()
+        except Exception:  # noqa: BLE001  フォーム未同期時は空で返す
+            return out
+        for qid, val in results.items():
+            if isinstance(val, list):
+                out[qid] = {str(v) for v in val}
+            elif isinstance(val, str) and val:
+                out[qid] = {val}
+            else:
+                out[qid] = set()
+        return out
+
     def _refresh_overlay(self) -> None:
         """ROIオーバーレイ(□枠＋インク比率)をシーンに描き直す。
 
-        枠色は検出結果に連動(チェック済=赤 / 未チェック=灰)。比率テキストは
-        ズームに依らず一定サイズで表示。再ラスタライズ(scene.clear)後にも
-        呼ばれるため、まず既存のオーバーレイ要素を取り除いてから再構築する。
+        「選択済み」判定は現在の校正値(フォーム状態=手修正を反映)に基づき、
+        選択済みの枠は太い赤線＋半透明の赤塗りで「選択済としてカウント中」と
+        分かるようにする。比率テキストは検出結果由来でズーム非依存に表示。
+        再ラスタライズ(scene.clear)後にも呼ばれるため、まず既存要素を除いてから
+        再構築する。
         """
         for item in self._overlay_items:
             if item.scene() is self._scene:
@@ -1930,6 +1959,11 @@ class MainWindowController(QObject):
         red = QColor(200, 40, 40)
         gray = QColor(140, 140, 140)
         green = QColor(20, 140, 60)
+        red_fill = QColor(200, 40, 40, 70)  # 選択済みマーク(半透明の赤塗り)
+        # 「選択済み」は現在の校正値(フォーム状態=保存/検出/手修正の確定値)で判定する。
+        # これが実際に集計される値であり、ユーザーの修正が即マークへ反映される。
+        selection = self._current_selection()
+        self._overlay_selection_cache = selection  # 再描画判定の基準を更新
         for q in self._survey.questions:
             # 自由記述の記入領域(region)を緑枠で表示
             if q.region is not None:
@@ -1945,11 +1979,14 @@ class MainWindowController(QObject):
             for opt in q.options:
                 x0, y0, x1, y1 = opt.checkbox
                 box = QRectF(x0 * w, y0 * h, (x1 - x0) * w, (y1 - y0) * h)
-                checked = res is not None and opt.value in res.checked
+                # 選択済み判定はフォーム状態(=集計される確定値)に基づく
+                checked = opt.value in selection.get(q.id, set())
                 pen = QPen(red if checked else gray)
                 pen.setCosmetic(True)  # ズームに依らず一定の線幅
                 pen.setWidthF(3.2 if checked else 1.8)  # 太め(視認性優先)
-                ritem = self._scene.addRect(box, pen)
+                # 選択済みは半透明の赤で塗り、「選択済としてカウント中」を明示
+                brush = QBrush(red_fill) if checked else QBrush(Qt.BrushStyle.NoBrush)
+                ritem = self._scene.addRect(box, pen, brush)
                 ritem.setZValue(10)
                 self._overlay_items.append(ritem)
                 # インク比率を「枠の直下」に常時一定サイズで表示。
