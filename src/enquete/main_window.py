@@ -93,7 +93,6 @@ from enquete.schema import (
     SINGLE_CHOICE,
     Rect,
     Survey,
-    survey_from_dict,
     survey_to_dict,
 )
 from enquete.store import SurveyDocument
@@ -219,6 +218,9 @@ class MainWindowController(QObject):
         self._model_btn: QToolButton | None = None
         # 操作フローのアクションバーの「確認済み」トグルボタン
         self._review_btn: QToolButton | None = None
+        # 「原紙(1枚目)を隠す」トグルと、その状態(QSettings で永続化)
+        self._ref_btn: QToolButton | None = None
+        self._reference_hidden = False
         # ズーム処理中フラグ。スクロールバー方針変更が誘発する Resize で
         # _apply_view が割り込み、増分スケールと二重適用されるのを防ぐ。
         self._zooming = False
@@ -289,6 +291,10 @@ class MainWindowController(QObject):
         self._overlay_ratios = bool(
             self._settings.value("overlay/ratios", False, type=bool)
         )
+        # 原紙(1枚目)をサムネイルから隠すか(既定: 表示)。
+        self._reference_hidden = bool(
+            self._settings.value("reference/hidden", False, type=bool)
+        )
 
         # PDF 表示用シーン
         self._scene = QGraphicsScene(self)
@@ -358,9 +364,10 @@ class MainWindowController(QObject):
         action_create = self.window.findChild(QAction, "actionCreateForm")
         if action_create is not None:
             action_create.triggered.connect(self.create_form)
+        # 「フォーム読み込み」は廃止(サイドカーが無ければ開いた時に自動作成する)
         action_load = self.window.findChild(QAction, "actionLoadForm")
         if action_load is not None:
-            action_load.triggered.connect(self.load_form)
+            action_load.setVisible(False)
         action_save = self.window.findChild(QAction, "actionSaveForm")
         if action_save is not None:
             action_save.triggered.connect(self.save_form)
@@ -612,7 +619,6 @@ class MainWindowController(QObject):
         form_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         fmenu = QMenu(form_btn)
         fmenu.addAction("フォーム作成（PDFから）", self.create_form)
-        fmenu.addAction("フォーム読み込み…", self.load_form)
         fmenu.addAction("フォーム編集…", self.open_form_editor)
         form_btn.setMenu(fmenu)
         h.addWidget(form_btn)
@@ -632,6 +638,18 @@ class MainWindowController(QObject):
         self._page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         h.addWidget(self._page_label)
         h.addWidget(btn("▶", self._go_next_page, "次のページ"))
+        # 原紙(1枚目クリーン)の表示/非表示トグル(差分基準があるときのみ有効)
+        ref_btn = QToolButton()
+        ref_btn.setCheckable(True)
+        ref_btn.setText("原紙を隠す")
+        ref_btn.setToolTip(
+            "1枚目のクリーン原紙をサムネイルから隠す/表示する（原紙は集計対象外）"
+        )
+        ref_btn.setEnabled(False)
+        ref_btn.setChecked(self._reference_hidden)
+        ref_btn.toggled.connect(self._toggle_reference_hidden)
+        self._ref_btn = ref_btn
+        h.addWidget(ref_btn)
         # このページを確認済みにする(トグル)。フォームのチェックと同期。
         review_btn = QToolButton()
         review_btn.setCheckable(True)
@@ -657,9 +675,40 @@ class MainWindowController(QObject):
             v.addWidget(self._splitter, 1)
             v.addWidget(bar, 0)
 
+    def _toggle_reference_hidden(self, hidden: bool) -> None:
+        """原紙(1枚目)の表示/非表示を切り替える(状態は永続化)。"""
+        self._reference_hidden = hidden
+        self._settings.setValue("reference/hidden", hidden)
+        self._apply_reference_visibility()
+
+    def _apply_reference_visibility(self) -> None:
+        """原紙(先頭)の表示状態とトグルボタンの有効可否を反映する。
+
+        原紙(差分基準)が存在するときだけトグル有効。隠す指定なら先頭サムネイルを
+        非表示にし、選択が先頭に乗っていれば次ページへ移す。
+        """
+        is_ref = self._is_reference_page(0)
+        if self._ref_btn is not None:
+            self._ref_btn.setEnabled(is_ref)
+        lst = self.thumbnail_list
+        if lst.count() == 0:
+            return
+        item = lst.item(0)
+        if item is not None:
+            item.setHidden(bool(is_ref and self._reference_hidden))
+        if (
+            is_ref
+            and self._reference_hidden
+            and lst.currentRow() == 0
+            and lst.count() > 1
+        ):
+            lst.setCurrentRow(1)
+
     def _go_prev_page(self) -> None:
         r = self.thumbnail_list.currentRow()
-        if r > 0:
+        # 原紙を隠しているときは先頭(原紙)へ戻さない
+        floor = 1 if (self._reference_hidden and self._is_reference_page(0)) else 0
+        if r > floor:
             self.thumbnail_list.setCurrentRow(r - 1)
 
     def _go_next_page(self) -> None:
@@ -1076,7 +1125,7 @@ class MainWindowController(QObject):
         self._save_store()
         # 現在表示中ページのフォームを保存結果で再表示
         if self._page_index >= 0:
-            self._detect_and_fill(self._page_index)
+            self._load_page_into_form(self._page_index)
         QMessageBox.information(
             self.window,
             "電子化完了",
@@ -1127,8 +1176,8 @@ class MainWindowController(QObject):
                 self.window,
                 "検出設定",
                 "フォームが読み込まれていません。\n"
-                "ツール→「フォーム作成」または「フォーム読み込み」でフォームを"
-                "指定してから開いてください。",
+                "PDFを開くと自動でフォームが作成されます。作成されない場合は"
+                "ツール→「フォーム作成」/「フォーム編集」をご利用ください。",
             )
             return
         dlg = self._settings_dialog
@@ -1177,8 +1226,41 @@ class MainWindowController(QObject):
         self._survey = survey
         self._install_form_pane(survey)
         if self._page_index >= 0:
-            self._detect_and_fill(self._page_index)
+            self._load_page_into_form(self._page_index)  # 作成直後は検出せず空表示
+        self._apply_reference_visibility()  # 差分ON/OFFで原紙トグルの有効可否が変わる
         self._save_store()
+
+    def _auto_create_form(self) -> bool:
+        """サイドカーが無いPDFを開いたとき、操作なしでフォームを自動生成・適用する。
+
+        テキスト層があればベクタ抽出、無ければ選択中の OCR で生成する。1枚目を
+        クリーンなアンケート用紙(差分の基準)とする運用に合わせ、差分認識
+        (use_diff)を既定で有効にする。生成できれば True、できなければ False。
+        """
+        if self.doc is None:
+            return False
+        path = self.doc.path
+        try:
+            if has_text_layer(path):
+                survey = generate_survey_from_pdf(path)
+            else:
+                backend = self._current_backend()
+                if backend is None:
+                    return False  # OCR 不可: 自動生成できない(編集モードのみ)
+                sb = self.window.statusBar()
+                if sb is not None:
+                    sb.showMessage(
+                        "OCRでフォームを自動作成中…（数十秒かかる場合があります）", 0
+                    )
+                survey = generate_survey_from_scans([path], backend)
+                if sb is not None:
+                    sb.clearMessage()
+        except Exception:  # noqa: BLE001  生成失敗時は編集モードへフォールバック
+            return False
+        # 1枚目クリーン基準の運用に合わせ、差分認識を既定で有効化
+        survey.detection.use_diff = True
+        self._apply_survey_to_doc(survey)
+        return True
 
     def create_form(self) -> None:
         """開いているPDFからフォーム定義を生成して適用する。
@@ -1209,9 +1291,8 @@ class MainWindowController(QObject):
                     "自動作成には OCR が必要です。現在の環境では利用可能な OCR "
                     "エンジンがないため、自動作成は行えません。\n\n"
                     "代わりに次の操作（編集モード）が利用できます：\n"
-                    "・ツール→「フォーム読み込み」で既存の定義(JSON)を読み込む\n"
                     "・ツール→「フォーム編集」(Ctrl+E)で設問・選択肢を編集する\n"
-                    "・読み込んだフォームで各ページを校正・保存する\n\n"
+                    "・編集したフォームで各ページを校正・保存する\n\n"
                     "OCRを使うには：\n"
                     "・macOS: Apple Vision（標準で利用可）\n"
                     "・Windows/Linux: Chrome screen-ai（locro 導入＋"
@@ -1228,6 +1309,8 @@ class MainWindowController(QObject):
             method = f"OCR（{backend.name}）"
             note = "\n※OCR由来のため座標は粗め。ROIオーバーレイ＋校正で調整してください。"
 
+        # 1枚目クリーン基準の運用に合わせ、差分認識を既定で有効化
+        survey.detection.use_diff = True
         self._apply_survey_to_doc(survey)
         n_opt = sum(len(q.options) for q in survey.questions)
         QMessageBox.information(
@@ -1285,36 +1368,13 @@ class MainWindowController(QObject):
         if statusbar is not None:
             statusbar.showMessage(f"フォームを保存しました: {Path(path).name}", 5000)
 
-    def load_form(self) -> None:
-        """フォームJSONを読み込み、以後の既定にして現在の文書へも即適用する。"""
-        path, _ = QFileDialog.getOpenFileName(
-            self.window,
-            "フォーム読み込み",
-            str(Path.cwd()),
-            "Form JSON (*.json)",
-        )
-        if not path:
-            return
-        try:
-            data = json.loads(Path(path).read_text(encoding="utf-8"))
-            survey = survey_from_dict(data["survey"])
-        except (KeyError, ValueError) as exc:
-            QMessageBox.warning(
-                self.window,
-                "フォーム読み込み",
-                f"フォームを読み込めませんでした:\n{exc}",
-            )
-            return
-        # 以後の既定にし、開いている文書へ即適用(校正結果は保持)
-        self._apply_survey_to_doc(survey)
-        statusbar = self.window.statusBar()
-        if statusbar is not None:
-            statusbar.showMessage(f"フォームを読み込みました: {survey.title}", 5000)
 
     def _on_detection_params_changed(self) -> None:
         """パラメータ変更 → 現在ページを再検出してフォーム・オーバーレイを更新。"""
         if self.doc is not None and self._page_index >= 0:
             self._detect_and_fill(self._page_index)
+        # 差分認識のON/OFFで原紙の有無が変わるため、表示状態を再評価
+        self._apply_reference_visibility()
 
     def _set_overlay_enabled(self, enabled: bool) -> None:
         self._overlay_enabled = enabled
@@ -1419,12 +1479,29 @@ class MainWindowController(QObject):
         self._form_scroll.setWidget(pane)
 
     # --------------------------------------------------- 校正結果の永続化
+    def _is_reference_page(self, index: int) -> bool:
+        """index が「1枚目クリーン原紙(差分の基準)」か。原紙は回答ではない。
+
+        差分認識ONかつ複数ページのときの先頭ページ(0)のみ True。
+        """
+        return (
+            index == DIFF_REFERENCE_PAGE
+            and self._survey is not None
+            and self._survey.detection.use_diff
+            and self.doc is not None
+            and len(self.doc) > 1
+        )
+
     def _capture_current_page(self) -> None:
-        """現在ページのフォーム内容を(メモリ上の)サイドカーへ取り込む。"""
+        """現在ページのフォーム内容を(メモリ上の)サイドカーへ取り込む。
+
+        1枚目クリーン原紙(差分の基準)は回答ではないので、結果に保存しない。
+        """
         if (
             self._doc_store is not None
             and self._page_index >= 0
             and self.form_pane is not None
+            and not self._is_reference_page(self._page_index)
         ):
             self._doc_store.set_results(
                 self._page_index, self.form_pane.get_results()
@@ -1510,24 +1587,26 @@ class MainWindowController(QObject):
             self._settings_dialog.close()
             self._settings_dialog = None
 
-        # フォームの決定: サイドカー優先 → 読み込み済みフォーム → 無ければ未設定
-        store = SurveyDocument.load(path, self._default_survey)
+        # フォームの決定: サイドカーがあれば復元、無ければ操作なしで自動作成。
+        store = SurveyDocument.load(path, None)
         if store.survey is not None:
             self._doc_store = store
             self._survey = store.survey
             self._install_form_pane(self._survey)
         else:
-            # フォーム未指定: PDF閲覧のみ可。フォーム作成/読み込みを促す。
+            # サイドカー無し: 1枚目クリーン基準で自動フォーム作成(差分認識ON)。
             self._doc_store = None
             self._survey = None
-            self._show_form_placeholder()
-            sb = self.window.statusBar()
-            if sb is not None:
-                sb.showMessage(
-                    "フォームがありません。ツール→「フォーム作成」または"
-                    "「フォーム読み込み」でフォームを指定してください。",
-                    0,
-                )
+            if not self._auto_create_form():
+                # 自動作成不可(スキャンPDFで OCR 不可など): 編集モードへ案内。
+                self._show_form_placeholder()
+                sb = self.window.statusBar()
+                if sb is not None:
+                    sb.showMessage(
+                        "フォームを自動作成できませんでした（スキャンPDFは OCR エンジンが"
+                        "必要です）。ツール→「フォーム作成」/「フォーム編集」をご利用ください。",
+                        0,
+                    )
 
         self._base_title = f"アンケート読み込み支援 — {Path(path).name}"
         self._update_title()
@@ -1535,6 +1614,8 @@ class MainWindowController(QObject):
 
         if len(self.doc) > 0:
             self.thumbnail_list.setCurrentRow(0)
+        # 原紙(1枚目)の表示状態・トグル有効可否を反映(隠す指定なら先頭を飛ばす)
+        self._apply_reference_visibility()
 
     # ------------------------------------------------------------------ rendering
     def _thumb_text(self, index: int) -> str:
@@ -1624,14 +1705,36 @@ class MainWindowController(QObject):
         self._render_page(self._desired_render_scale())
         # ズーム係数を保ったままページに合わせて再表示
         self._apply_view()
-        # チェックボックス検出 → フォームへ反映
-        self._detect_and_fill(index)
+        # 表示時は検出しない。保存済み結果(無ければ空)を反映するだけ。
+        # チェックの読み取りは「③電子化」で実行する。
+        self._load_page_into_form(index)
         self._update_page_label()
+
+    def _load_page_into_form(self, index: int) -> None:
+        """検出は行わず、保存済み校正結果(無ければ空)をフォームへ反映する。
+
+        読み込み・ページ送りの時点では自動検出しない方針。チェックの読み取りは
+        「③電子化」を押したときにまとめて実行する。ここではサイドカーに保存済みの
+        結果があれば復元し、無ければ空のフォームを表示する。
+        """
+        if self.doc is None or self.form_pane is None or self._survey is None:
+            return
+        self._last_results = {}  # 未検出: オーバーレイにインク比率は出さない
+        saved = self._doc_store.get_results(index) if self._doc_store else None
+        self.form_pane.blockSignals(True)
+        self.form_pane.set_results_dict(saved or {})  # 空 dict で全項目クリア
+        reviewed_now = self._doc_store.is_reviewed(index) if self._doc_store else False
+        self.form_pane.set_reviewed(reviewed_now)
+        self.form_pane.blockSignals(False)
+        if self._review_btn is not None:
+            self._review_btn.setEnabled(self._doc_store is not None)
+        self._sync_review_btn(reviewed_now)
+        self._refresh_overlay()
 
     def _detect_and_fill(self, index: int) -> None:
         """検出を実行し、保存済み校正結果があれば優先してフォームへ反映する。
 
-        オーバーレイ用に検出は常に実行する。フォームの中身は、保存済みの
+        検出設定のプレビュー(パラメータ変更時)で使う。フォームの中身は、保存済みの
         校正結果があればそれを復元し、無ければ検出結果を初期値として表示する。
         """
         if self.doc is None or self.form_pane is None or self._survey is None:
@@ -1916,7 +2019,7 @@ class MainWindowController(QObject):
         progress.setValue(len(indices))
         self._save_store()
         if self._page_index >= 0:
-            self._detect_and_fill(self._page_index)
+            self._load_page_into_form(self._page_index)
         sb = self.window.statusBar()
         if sb is not None:
             scope = "全ページ" if all_pages else "このページ"

@@ -186,6 +186,18 @@ def generate_survey_from_pdf(
                     options=cur_q["options"],
                 )
             )
+            # 選択肢の空欄括弧(例「その他（  ）」)は自由入力欄として別途生成する。
+            for k, (base, region) in enumerate(cur_q.get("fills", []), 1):
+                questions.append(
+                    Question(
+                        id=f"{cur_q['id']}_fill{k}",
+                        label=f"{base}（自由記述）",
+                        type=FREE_TEXT,
+                        no=None,
+                        region=region,
+                        multiline=False,
+                    )
+                )
         cur_q = None
 
     for i, line in enumerate(lines):
@@ -339,6 +351,44 @@ def _add_circle_options(
             )
 
 
+_BLANK_PAREN = re.compile(r"[（(][\s　]*[）)]\s*$")
+
+
+def _fillin_region(label_items: list[tuple], w: float, h: float) -> Rect | None:
+    """選択肢ラベル中の「（…）」の中身が空白のみなら、内側の正規化Rectを返す。
+
+    例「その他（　　）」は記入欄。一方「X(旧 Twitter)」のように中身に文字が
+    ある括弧はラベルなので None を返す(自由入力欄ではない)。
+    """
+    op = cl = None
+    for idx, e in enumerate(label_items):
+        if e[0] in "（(" and op is None:
+            op = idx
+        elif e[0] in "）)" and op is not None:
+            cl = idx
+            break
+    if op is None or cl is None or cl <= op:
+        return None
+    inner = label_items[op + 1 : cl]
+    if any(e[0] not in " 　" for e in inner):
+        return None  # 括弧内に文字がある → 記入欄ではない
+    left = label_items[op][3]   # （ の右端
+    right = label_items[cl][1]  # ） の左端
+    if right - left < 4.0:      # 記入の余地がない狭い括弧は無視
+        return None
+    bottom = min(label_items[op][2], label_items[cl][2])
+    top = max(label_items[op][4], label_items[cl][4])
+    # 手書きの上下はみ出しを拾えるよう縦に余裕を持たせる
+    pad = 0.4 * (top - bottom)
+    top, bottom = top + pad, bottom - pad
+    return (
+        left / w,
+        max(0.0, (h - top) / h),
+        right / w,
+        min(1.0, (h - bottom) / h),
+    )
+
+
 def _collect_options(
     line: list[tuple], w: float, h: float, cur_q: dict | None, group: str | None
 ) -> None:
@@ -349,17 +399,27 @@ def _collect_options(
         ch, l, b, r, t, _ = line[i]
         if ch == _CHECKBOX:
             # 直後〜次の□までをラベルに
-            label_chars = []
+            label_items: list[tuple] = []
             j = i + 1
             while j < len(line) and line[j][0] != _CHECKBOX:
-                label_chars.append(line[j][0])
+                label_items.append(line[j])
                 j += 1
-            value = _clean("".join(label_chars))
+            raw = "".join(e[0] for e in label_items)
+            value = _clean(raw)
             if value:
                 checkbox = (l / w, (h - t) / h, r / w, (h - b) / h)
-                cur_q["options"].append(
-                    Option(value=value, checkbox=checkbox, group=group)
-                )
+                fill = _fillin_region(label_items, w, h)
+                if fill is not None:
+                    # 「その他（  ）」→ 選択肢「その他」＋ 括弧内を自由入力欄に
+                    base = _clean(_BLANK_PAREN.sub("", raw)) or value
+                    cur_q["options"].append(
+                        Option(value=base, checkbox=checkbox, group=group)
+                    )
+                    cur_q.setdefault("fills", []).append((base, fill))
+                else:
+                    cur_q["options"].append(
+                        Option(value=value, checkbox=checkbox, group=group)
+                    )
             i = j
         else:
             i += 1

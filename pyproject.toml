@@ -1,6 +1,6 @@
 [project]
 name = "enquete"
-version = "0.1.4"
+version = "0.1.5"
 description = "アンケート読み込み支援アプリ(3ペイン: サムネイル / PDF表示 / 入力結果)"
 license = "MIT"
 license-files = ["LICENSE"]
