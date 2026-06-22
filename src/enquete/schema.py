@@ -56,6 +56,7 @@ class CheckboxDetection:
     # 検出パラメータは UI から調整・保存するため可変(非 frozen)。
     render_scale: float = 2.0
     roi_inset: float = 0.30  # box: 枠線を除外する内側マージン
+    box_expand: float = 0.0  # box: 判定ROIを外側へ広げる率(枠外へはみ出すマークも拾う)
     ink_threshold: float = 0.25  # box: チェック判定の暗画素比率
     dark_level: float = 0.5  # 「暗い」とみなすグレー閾値(共通)
     # number_mark 用: 番号マーカーROIを異方拡張(x広め/y狭め=隣接行の混入回避)し、
@@ -74,6 +75,9 @@ class CheckboxDetection:
     use_diff: bool = False  # 差分検出を使うか
     diff_level: float = 0.25  # 「加筆インク」とみなす明度差(基準−記入)の閾値
     diff_threshold: float = 0.08  # 差分でのチェック判定(ROI内の加筆画素比率)
+    # 原紙が電子データ出力のPDF(スキャンでない=厳密に正立)か。位置補正で原紙の
+    # 水平化(Hough)をスキップし、原紙を厳密な基準フレームとして扱う。
+    reference_is_vector: bool = False
 
 
 @dataclass(frozen=True)
@@ -97,6 +101,7 @@ def survey_from_dict(data: dict) -> Survey:
     detection = CheckboxDetection(
         render_scale=float(det_raw.get("render_scale", 2.0)),
         roi_inset=float(det_raw.get("roi_inset", 0.30)),
+        box_expand=float(det_raw.get("box_expand", 0.0)),
         ink_threshold=float(det_raw.get("ink_threshold", 0.25)),
         dark_level=float(det_raw.get("dark_level", 0.5)),
         mark_expand_x=float(det_raw.get("mark_expand_x", 0.9)),
@@ -108,6 +113,7 @@ def survey_from_dict(data: dict) -> Survey:
         use_diff=bool(det_raw.get("use_diff", False)),
         diff_level=float(det_raw.get("diff_level", 0.25)),
         diff_threshold=float(det_raw.get("diff_threshold", 0.08)),
+        reference_is_vector=bool(det_raw.get("reference_is_vector", False)),
     )
 
     questions: list[Question] = []
@@ -180,6 +186,7 @@ def survey_to_dict(survey: Survey) -> dict:
         "checkbox_detection": {
             "render_scale": survey.detection.render_scale,
             "roi_inset": survey.detection.roi_inset,
+            "box_expand": survey.detection.box_expand,
             "ink_threshold": survey.detection.ink_threshold,
             "dark_level": survey.detection.dark_level,
             "mark_expand_x": survey.detection.mark_expand_x,
@@ -191,6 +198,7 @@ def survey_to_dict(survey: Survey) -> dict:
             "use_diff": survey.detection.use_diff,
             "diff_level": survey.detection.diff_level,
             "diff_threshold": survey.detection.diff_threshold,
+            "reference_is_vector": survey.detection.reference_is_vector,
         },
         "questions": questions,
     }

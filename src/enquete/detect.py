@@ -120,7 +120,12 @@ def _option_ratio(
     if opt.marker_type == MARKER_NUMBER:
         roi = _expand_rect(opt.checkbox, det.mark_expand_x, det.mark_expand_y)
         return _circle_radius_ratio(gray, roi), det.mark_threshold
-    return _ink_ratio(gray, opt.checkbox, det.roi_inset, det.dark_level), det.ink_threshold
+    # box: 内側マージン(roi_inset・枠線除外)と外側拡張(box_expand・枠外マークも拾う)
+    # を相殺した「正味マージン」で判定領域を決める。box_expand=0 なら従来どおり inset
+    # 分だけ内側を測る。box_expand>roi_inset なら□の外側まで判定範囲が広がる。
+    margin = det.box_expand - det.roi_inset  # +で外側へ拡張 / −で内側へ縮小
+    roi = _expand_rect(opt.checkbox, margin, margin)
+    return _ink_ratio(gray, roi, 0.0, det.dark_level), det.ink_threshold
 
 
 def detect_checkboxes(

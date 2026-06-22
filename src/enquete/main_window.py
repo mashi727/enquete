@@ -6,6 +6,7 @@ Designer での編集:  uv run pyside6-designer src/enquete/ui/main_window.ui
 """
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
@@ -35,11 +36,13 @@ from PySide6.QtGui import (
     QIcon,
     QImage,
     QKeyEvent,
+    QKeySequence,
     QMouseEvent,
     QNativeGestureEvent,
     QPainter,
     QPen,
     QPixmap,
+    QShortcut,
     QTransform,
     QWheelEvent,
 )
@@ -74,6 +77,7 @@ from enquete.detection_settings_dialog import DetectionSettingsDialog
 from enquete.form_editor_dialog import FormEditorDialog
 from enquete.form_pane import FormPane
 from enquete.formgen import generate_survey_from_pdf, has_text_layer
+from enquete.align import write_aligned_pdf
 from enquete.deskew import write_deskewed_pdf
 from enquete.merge import insert_pdf
 from enquete.digitize import digitize_page, merge_results, recognize_region
@@ -89,8 +93,10 @@ from enquete.pdf import PdfDocument
 from enquete.region_edit_item import RegionEditItem
 from enquete.schema import (
     FREE_TEXT,
+    MARKER_BOX,
     MULTI_CHOICE,
     SINGLE_CHOICE,
+    CheckboxDetection,
     Rect,
     Survey,
     survey_to_dict,
@@ -114,8 +120,6 @@ RENDER_HEADROOM = 1.1
 # 一括電子化(データ化)時のラスタライズ倍率。検出比率は正規化で倍率非依存だが、
 # 自由記述OCRの精度のため本表示より高めに描く。
 DIGITIZE_RENDER_SCALE = 3.0
-# 差分検出の基準ページ(先頭=クリーンなアンケート用紙の想定)
-DIFF_REFERENCE_PAGE = 0
 # 縦横比のフォールバック(A4縦 595:841)。実ページ取得後に上書きする。
 DEFAULT_PAGE_ASPECT = 595.0 / 841.0
 
@@ -210,7 +214,10 @@ class MainWindowController(QObject):
         self._skew_drag = False
         self._skew_angle0 = 0.0
         self._skew_base_deg = 0.0
-        # 差分検出: 基準ページのグレースケールを (scale, ndarray) でキャッシュ
+        # 差分検出の基準＝別PDFで指定する原紙。開いた文書(記入済み)とは別扱い。
+        self._reference_path: str | None = None
+        self._reference_doc: PdfDocument | None = None
+        # 差分基準(原紙)のグレースケールを (scale, ndarray) でキャッシュ
         self._clean_cache: tuple[float, object] | None = None
         # 操作フローのアクションバーのページ表示ラベル
         self._page_label: QLabel | None = None
@@ -218,9 +225,9 @@ class MainWindowController(QObject):
         self._model_btn: QToolButton | None = None
         # 操作フローのアクションバーの「確認済み」トグルボタン
         self._review_btn: QToolButton | None = None
-        # 「原紙(1枚目)を隠す」トグルと、その状態(QSettings で永続化)
-        self._ref_btn: QToolButton | None = None
-        self._reference_hidden = False
+        # 現在ページの「確認済み時点の結果」スナップショット(編集差分の検知・Esc復帰用)。
+        # None=現在ページは未確認(復帰先なし)。
+        self._confirmed_results: dict | None = None
         # ズーム処理中フラグ。スクロールバー方針変更が誘発する Resize で
         # _apply_view が割り込み、増分スケールと二重適用されるのを防ぐ。
         self._zooming = False
@@ -242,15 +249,33 @@ class MainWindowController(QObject):
         # スプリッタ参照(分割比の永続化に使用)
         self._splitter = window.findChild(QSplitter, "splitter")
         self._left_splitter = window.findChild(QSplitter, "leftSplitter")
+        # PDF表示とフォーム(右ペイン)のスクロールを相互連動させる際の再帰防止。
+        self._scroll_sync_guard = False
 
         # アンケート設問定義と入力フォーム(右ペインへ注入)
-        # フォーム定義は内蔵せず、ツールの「フォーム作成／読み込み」で与える。
+        # フォーム定義は内蔵せず、原紙PDFの指定(=フォーム作成)で与える。
         self._form_scroll = form_scroll
         self._default_survey: Survey | None = None  # 読み込み済みフォーム(新規PDFの既定)
         self._survey: Survey | None = None  # 現在アクティブなフォーム
+        # 原紙でフォーム編集モード中の情報({"filled","genshi"})。None=非編集中。
+        self._genshi_edit: dict | None = None
+        self._digitize_btn: QPushButton | None = None  # ③電子化ボタン(モードで表示切替)
+        self._struct_btn: QPushButton | None = None  # 構造編集ボタン(原紙モードで表示)
+        self._vector_check: QCheckBox | None = None  # 原紙=電子PDF(原紙モードで表示)
+        # 作業モード。True=校正モード(確認済み✓を保護) / False=自動認識(全上書き)。
+        self._proof_mode = False
+        self._mode_btn: QToolButton | None = None
+        self._act_mode_auto: QAction | None = None
+        self._act_mode_proof: QAction | None = None
+        self._settings_btn: QPushButton | None = None  # 検出設定ボタン(校正で不活性)
         # 起動時はPDF未読込のためフォームは出さず、プレースホルダのみ表示。
         self.form_pane: FormPane | None = None
         self._show_form_placeholder()
+        # PDF表示と右ペイン(読み取り結果)のスクロールを相互連動させる。
+        self.pdf_view.verticalScrollBar().valueChanged.connect(self._on_pdf_scrolled)
+        self._form_scroll.verticalScrollBar().valueChanged.connect(
+            self._on_form_scrolled
+        )
 
         # サイドカー(校正結果の保存・再開)
         self._doc_store: SurveyDocument | None = None
@@ -291,10 +316,6 @@ class MainWindowController(QObject):
         self._overlay_ratios = bool(
             self._settings.value("overlay/ratios", False, type=bool)
         )
-        # 原紙(1枚目)をサムネイルから隠すか(既定: 表示)。
-        self._reference_hidden = bool(
-            self._settings.value("reference/hidden", False, type=bool)
-        )
 
         # PDF 表示用シーン
         self._scene = QGraphicsScene(self)
@@ -325,6 +346,10 @@ class MainWindowController(QObject):
         self.thumbnail_list.installEventFilter(self)
         self.thumbnail_list.setAcceptDrops(True)
         self.thumbnail_list.viewport().setAcceptDrops(True)
+        # Esc の一元処理: 傾き補正→原紙編集→確認済み編集の取消(復帰) の優先順で。
+        # フォーカス位置によらず拾えるよう、ウィンドウのショートカットにする。
+        self._esc_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self.window)
+        self._esc_shortcut.activated.connect(self._on_escape)
 
         self._connect()
         # 既定モード(横幅いっぱい)のスクロールバー方針を適用
@@ -361,23 +386,19 @@ class MainWindowController(QObject):
         if action_settings is not None:
             action_settings.triggered.connect(self.open_detection_settings)
 
-        action_create = self.window.findChild(QAction, "actionCreateForm")
-        if action_create is not None:
-            action_create.triggered.connect(self.create_form)
-        # 「フォーム読み込み」は廃止(サイドカーが無ければ開いた時に自動作成する)
-        action_load = self.window.findChild(QAction, "actionLoadForm")
-        if action_load is not None:
-            action_load.setVisible(False)
-        action_save = self.window.findChild(QAction, "actionSaveForm")
-        if action_save is not None:
-            action_save.triggered.connect(self.save_form)
-        action_edit = self.window.findChild(QAction, "actionEditForm")
-        if action_edit is not None:
-            action_edit.triggered.connect(self.open_form_editor)
+        # フォーム作成/読込/編集/保存のメニューは廃止。フォーム編集は「③電子化→
+        # 原紙を指定」の原紙編集モード(構造編集ボタン＋右ペインの範囲指定)に集約する。
+        for name in (
+            "actionCreateForm", "actionLoadForm", "actionEditForm", "actionSaveForm",
+        ):
+            act = self.window.findChild(QAction, name)
+            if act is not None:
+                act.setVisible(False)
 
         self._build_ocr_menu()
         self._build_merge_menu()
-        self._build_deskew_toolbar()
+        # 傾き補正は「電子化→原紙を指定」の位置補正(自動・水平化＋平行移動)に統合
+        # したため、手動の傾き補正モード(トグル/ボタン)は設けない。
         self._build_action_bar()
 
         for name, delta in (("actionFontLarger", +1), ("actionFontSmaller", -1)):
@@ -550,8 +571,8 @@ class MainWindowController(QObject):
     def _build_action_bar(self) -> None:
         """最下段に作業順のボタンバー(4つ目の領域)を設置する。
 
-        左→右が一連の作業: 開く → フォーム → 傾き補正 → 電子化 →
-        校正(ページ送り/保存) → 分割/マージ。
+        左→右が一連の作業: 開く → 電子化(原紙指定＝フォーム/位置補正) →
+        校正(ページ送り/確認) → 分割/マージ。
         """
         bar = QWidget(self.window)
         bar.setObjectName("actionBar")
@@ -596,7 +617,7 @@ class MainWindowController(QObject):
 
         h.addStretch(1)  # 右寄せ
         # 1) 開く
-        h.addWidget(btn("① 開く", self.open_pdf, "PDFを開く（ドラッグ&ドロップも可）"))
+        h.addWidget(btn("開く", self.open_pdf, "PDFを開く（ドラッグ&ドロップも可）"))
         # 開くの次に、使用中のモデル(OCRエンジン)を表示・切替するドロップダウン
         model_btn = QToolButton()
         model_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -613,23 +634,58 @@ class MainWindowController(QObject):
         self._model_btn = model_btn
         h.addWidget(model_btn)
         self._update_model_label()
-        # 2) フォーム(作成/読込/編集) ＝ドロップダウン
-        form_btn = QToolButton()
-        form_btn.setText("② フォーム ▾")
-        form_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        fmenu = QMenu(form_btn)
-        fmenu.addAction("フォーム作成（PDFから）", self.create_form)
-        fmenu.addAction("フォーム編集…", self.open_form_editor)
-        form_btn.setMenu(fmenu)
-        h.addWidget(form_btn)
+        # フォーム編集は「③電子化→原紙を指定」の原紙編集モードに集約。構造編集
+        # (設問・選択肢)ボタンはそのモード中だけ表示する。
+        self._struct_btn = btn(
+            "設問・選択肢を編集…", self.open_form_editor,
+            "原紙のフォーム構造（設問・選択肢・種別）を編集します",
+        )
+        self._struct_btn.setVisible(False)
+        h.addWidget(self._struct_btn)
+        # 原紙=電子データ出力PDF(スキャンでない)か。位置補正で原紙の水平化を省く。
+        self._vector_check = QCheckBox("原紙は電子PDF")
+        self._vector_check.setToolTip(
+            "原紙がスキャンではなく電子データから出力したPDFのとき ON。"
+            "位置補正で原紙の水平化を省き、原紙を厳密な基準にします（自動判定が初期値）。"
+        )
+        self._vector_check.setVisible(False)
+        self._vector_check.toggled.connect(self._on_vector_check_toggled)
+        h.addWidget(self._vector_check)
         h.addWidget(sep())
-        # 3) 傾き補正(モード) ＝上部ツールバーと同じ QAction を共有
-        if self._skew_action is not None:
-            skew_btn = QToolButton()
-            skew_btn.setDefaultAction(self._skew_action)
-            h.addWidget(skew_btn)
-        # 4) 電子化
-        h.addWidget(btn("③ 電子化", self.run_digitize_all, "全ページを一括電子化"))
+        # 作業モード: 自動認識(全上書き) / 校正(確認済み✓ページを保護)。サイドカー
+        # がある(電子化済み)PDFを開くと校正モードを既定にする。
+        mode_btn = QToolButton()
+        mode_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        mmode = QMenu(mode_btn)
+        self._act_mode_auto = mmode.addAction(
+            "自動認識モード（全ページ上書き）",
+            lambda: self._set_proof_mode(False),
+        )
+        self._act_mode_proof = mmode.addAction(
+            "校正モード（確認済み✓を保護）",
+            lambda: self._set_proof_mode(True),
+        )
+        for a in (self._act_mode_auto, self._act_mode_proof):
+            a.setCheckable(True)
+        mode_btn.setMenu(mmode)
+        mode_btn.setToolTip(
+            "電子化・再電子化の対象。自動認識=全ページ上書き / "
+            "校正=確認済み(✓)ページを上書きしない"
+        )
+        self._mode_btn = mode_btn
+        h.addWidget(mode_btn)
+        # 電子化（原紙編集モード中は「✓ この原紙で電子化」に表示が変わる）
+        self._digitize_btn = btn("電子化", self.run_digitize_all, "全ページを一括電子化")
+        h.addWidget(self._digitize_btn)
+        # 検出設定（閾値・判定範囲などの調整／「適用（再電子化）」もここから）
+        self._settings_btn = btn(
+            "検出設定", self.open_detection_settings,
+            "チェック検出の閾値・判定範囲などを調整（適用で全ページ再電子化）",
+        )
+        h.addWidget(self._settings_btn)
+        # 既定モードを反映(校正モードなら電子化・検出設定を不活性)。PDFを開くと
+        # サイドカー有無で切り替わる。ボタン生成後に呼ぶ必要がある。
+        self._set_proof_mode(False)
         h.addWidget(sep())
         # 5) 校正: ページ送り＋確認済みトグル(保存は全面オートセーブ)
         h.addWidget(btn("◀", self._go_prev_page, "前のページ"))
@@ -638,18 +694,6 @@ class MainWindowController(QObject):
         self._page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         h.addWidget(self._page_label)
         h.addWidget(btn("▶", self._go_next_page, "次のページ"))
-        # 原紙(1枚目クリーン)の表示/非表示トグル(差分基準があるときのみ有効)
-        ref_btn = QToolButton()
-        ref_btn.setCheckable(True)
-        ref_btn.setText("原紙を隠す")
-        ref_btn.setToolTip(
-            "1枚目のクリーン原紙をサムネイルから隠す/表示する（原紙は集計対象外）"
-        )
-        ref_btn.setEnabled(False)
-        ref_btn.setChecked(self._reference_hidden)
-        ref_btn.toggled.connect(self._toggle_reference_hidden)
-        self._ref_btn = ref_btn
-        h.addWidget(ref_btn)
         # このページを確認済みにする(トグル)。フォームのチェックと同期。
         review_btn = QToolButton()
         review_btn.setCheckable(True)
@@ -675,40 +719,9 @@ class MainWindowController(QObject):
             v.addWidget(self._splitter, 1)
             v.addWidget(bar, 0)
 
-    def _toggle_reference_hidden(self, hidden: bool) -> None:
-        """原紙(1枚目)の表示/非表示を切り替える(状態は永続化)。"""
-        self._reference_hidden = hidden
-        self._settings.setValue("reference/hidden", hidden)
-        self._apply_reference_visibility()
-
-    def _apply_reference_visibility(self) -> None:
-        """原紙(先頭)の表示状態とトグルボタンの有効可否を反映する。
-
-        原紙(差分基準)が存在するときだけトグル有効。隠す指定なら先頭サムネイルを
-        非表示にし、選択が先頭に乗っていれば次ページへ移す。
-        """
-        is_ref = self._is_reference_page(0)
-        if self._ref_btn is not None:
-            self._ref_btn.setEnabled(is_ref)
-        lst = self.thumbnail_list
-        if lst.count() == 0:
-            return
-        item = lst.item(0)
-        if item is not None:
-            item.setHidden(bool(is_ref and self._reference_hidden))
-        if (
-            is_ref
-            and self._reference_hidden
-            and lst.currentRow() == 0
-            and lst.count() > 1
-        ):
-            lst.setCurrentRow(1)
-
     def _go_prev_page(self) -> None:
         r = self.thumbnail_list.currentRow()
-        # 原紙を隠しているときは先頭(原紙)へ戻さない
-        floor = 1 if (self._reference_hidden and self._is_reference_page(0)) else 0
-        if r > floor:
+        if r > 0:
             self.thumbnail_list.setCurrentRow(r - 1)
 
     def _go_next_page(self) -> None:
@@ -764,22 +777,25 @@ class MainWindowController(QObject):
 
     # ----------------------------------------------------------- 差分検出
     def _use_diff_for(self, index: int) -> bool:
-        """このページで差分検出を使うか(設定ON＋基準ページ以外＋複数ページ)。"""
+        """このページで差分検出を使うか。
+
+        差分の基準は別PDFで指定した原紙。原紙が指定され、設定が差分ONなら、
+        全ページ(記入済み)を原紙との差分で判定する(ページ番号の特別扱いはしない)。
+        """
         return (
             self._survey is not None
             and self._survey.detection.use_diff
+            and self._reference_doc is not None
             and self.doc is not None
-            and len(self.doc) > 1
-            and index != DIFF_REFERENCE_PAGE
         )
 
     def _clean_gray(self, scale: float):
-        """差分の基準となる先頭(クリーン)ページのグレースケールを返す(scale毎にキャッシュ)。"""
-        if self.doc is None:
+        """差分の基準＝別指定の原紙PDFの1ページ目をグレースケールで返す(scale毎にキャッシュ)。"""
+        if self._reference_doc is None:
             return None
         if self._clean_cache is not None and abs(self._clean_cache[0] - scale) < 1e-9:
             return self._clean_cache[1]
-        gray = qimage_to_gray(self._render_image(DIFF_REFERENCE_PAGE, scale))
+        gray = qimage_to_gray(self._reference_doc.render(0, scale=scale))
         self._clean_cache = (scale, gray)
         return gray
 
@@ -1017,6 +1033,7 @@ class MainWindowController(QObject):
         if tools is None:
             return
         tools.addSeparator()
+        # 原紙の指定は「③電子化」の中で尋ねる(独立メニューは設けない)。
         act_digitize = QAction("アンケートを電子化（一括）…", self.window)
         act_digitize.triggered.connect(self.run_digitize_all)
         tools.addAction(act_digitize)
@@ -1054,6 +1071,8 @@ class MainWindowController(QObject):
         )
         info.setWordWrap(True)
         cb_reviewed = QCheckBox("確認済みのページも対象にする")
+        # 校正モードは確認済み✓を保護する方針なので既定でOFF、自動認識はON。
+        cb_reviewed.setChecked(not self._proof_mode)
         cb_overwrite = QCheckBox("既存の入力も上書きする（既定は空欄のみ補完）")
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -1075,21 +1094,82 @@ class MainWindowController(QObject):
         return cb_reviewed.isChecked(), cb_overwrite.isChecked()
 
     def run_digitize_all(self) -> None:
-        """全ページを設問種別ごとの最適方式で一括電子化し、サイドカーへ保存する。"""
+        """全ページを設問種別ごとの最適方式で一括電子化し、サイドカーへ保存する。
+
+        電子化の直前に「原紙を指定するか」を尋ねる。原紙を指定すると、原紙PDFを
+        表示した編集モードに入り、構造編集＋自由記述の範囲指定を行える。「✓ この原紙
+        で電子化」で原紙.jsonを保存→記入済みPDFに戻って読み取る。指定しない場合は
+        現在のフォームでそのまま読み取る。
+        """
+        # 原紙フォーム編集中に押された場合 = 「確定して電子化」。
+        if self._genshi_edit is not None:
+            self._finish_genshi_edit()
+            return
+        if self.doc is None:
+            QMessageBox.information(
+                self.window, "電子化",
+                "電子化するには、まず「開く」で記入済みアンケートPDFを開いてください。",
+            )
+            return
+
+        # --- 原紙(=フォーム定義＋差分基準)を指定するか尋ねる -------------------
+        choice = self._ask_reference_choice()
+        if choice is None:
+            return  # キャンセル
+        if choice == "specify":
+            start = self._reference_path or str(Path.cwd())
+            path, _ = QFileDialog.getOpenFileName(
+                self.window, "原紙（クリーンなアンケート用紙）PDFを選択",
+                start, "PDF Files (*.pdf *.PDF)",
+            )
+            if not path:
+                return
+            survey = self._obtain_reference_survey(path)
+            if survey is None:
+                return
+            # 原紙を表示してフォーム編集できるモードへ。確定は「✓ この原紙で電子化」。
+            self._enter_genshi_edit(str(self.doc.path), path, survey)
+            return
+        # 指定しない: 現在のフォームでそのまま電子化。
+        if self._survey is None or self._doc_store is None:
+            QMessageBox.information(
+                self.window, "電子化",
+                "この記入済みPDFにはまだフォームがありません。\n"
+                "「原紙を指定」を選び、原紙PDFからフォームを用意してください。",
+            )
+            return
+        self._digitize_now()
+
+    def _digitize_now(self) -> None:
+        """現在のフォーム・差分基準で全ページを一括電子化し、サイドカーへ保存する。"""
+        if self.doc is None or self._survey is None or self._doc_store is None:
+            return
+        opts = self._ask_digitize_options(len(self.doc), self._current_backend())
+        if opts is None:
+            return
+        self._run_digitize(*opts)
+
+    def reapply_detection(self) -> None:
+        """検出設定だけ変えて再電子化する(原紙再指定なし・既存結果は上書き)。
+
+        検出設定ダイアログの「適用（再電子化）」から呼ぶ。確認ダイアログは出さない。
+        校正モードでは確認済み(✓)ページをスキップして手校正を守り、自動認識モードでは
+        確認済みも含め全ページを上書きする。
+        """
         if self.doc is None or self._survey is None or self._doc_store is None:
             QMessageBox.information(
-                self.window,
-                "電子化",
-                "電子化するには、PDFを開きフォーム（作成または読み込み）を"
-                "用意してください。",
+                self.window, "再電子化",
+                "再電子化するには、PDFを開いて電子化（原紙指定）を済ませてください。",
             )
+            return
+        self._run_digitize(include_reviewed=not self._proof_mode, overwrite=True)
+
+    def _run_digitize(self, include_reviewed: bool, overwrite: bool) -> None:
+        """全ページを現在のフォーム・差分基準・検出設定で電子化し保存する(共通処理)。"""
+        if self.doc is None or self._survey is None or self._doc_store is None:
             return
         total = len(self.doc)
         backend = self._current_backend()
-        opts = self._ask_digitize_options(total, backend)
-        if opts is None:
-            return
-        include_reviewed, overwrite = opts
 
         # 編集中の現ページを確定保存してから一括処理に入る
         self._capture_current_page()
@@ -1098,7 +1178,8 @@ class MainWindowController(QObject):
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(0)
         processed = skipped = 0
-        use_diff = self._survey.detection.use_diff and total > 1
+        # 差分の基準は別指定の原紙PDF。指定があれば全ページを原紙との差分で判定。
+        use_diff = self._use_diff_for(0)
         clean = self._clean_gray(DIGITIZE_RENDER_SCALE) if use_diff else None
         for index in range(total):
             progress.setValue(index)
@@ -1107,14 +1188,9 @@ class MainWindowController(QObject):
             if not include_reviewed and self._doc_store.is_reviewed(index):
                 skipped += 1
                 continue
-            # 差分検出時は基準(先頭)ページ自体は回答ではないので対象外
-            if use_diff and index == DIFF_REFERENCE_PAGE:
-                skipped += 1
-                continue
             image = self._render_image(index, DIGITIZE_RENDER_SCALE)
             new = digitize_page(
-                image, self._survey, backend,
-                clean=clean if index != DIFF_REFERENCE_PAGE else None,
+                image, self._survey, backend, clean=clean,
             )
             existing = self._doc_store.get_results(index) or {}
             merged = merge_results(existing, new, overwrite=overwrite)
@@ -1134,21 +1210,282 @@ class MainWindowController(QObject):
             + f"。\n結果はサイドカー（{self._doc_store.json_path.name}）に保存しました。",
         )
 
+    def _ask_reference_choice(self) -> str | None:
+        """電子化の直前、原紙を指定するか尋ねる。'specify'/'skip'/None(キャンセル)。"""
+        box = QMessageBox(self.window)
+        box.setWindowTitle("電子化 — 原紙の指定")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText("この記入済みPDFの電子化に使うフォーム（原紙）を指定しますか？")
+        box.setInformativeText(
+            "・原紙を指定: 原紙PDFのフォームで電子化します"
+            "（同名サイドカーJSONがあれば再利用、無ければ原紙を読み取り→編集→保存）。"
+            "原紙との差分でチェックを判定します。\n"
+            "・指定しない: いま読み込み済みのフォームで電子化します。"
+        )
+        b_spec = box.addButton("原紙を指定", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("指定しない", QMessageBox.ButtonRole.NoRole)
+        b_cancel = box.addButton("キャンセル", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(b_spec)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is b_cancel or clicked is None:
+            return None
+        return "specify" if clicked is b_spec else "skip"
+
+    def _obtain_reference_survey(self, genshi_path: str) -> Survey | None:
+        """原紙のフォーム定義(初期値)を得る。編集はこの後の原紙表示モードで行う。
+
+        原紙.json があればそれを返す。無ければ原紙を読み取って生成する。原紙が
+        読み取れず OCR も使えない場合は、空フォームを返して手編集に委ねる。
+        """
+        # 原紙が電子データ出力PDF(テキスト層あり=スキャンでない)かを自動判定し、
+        # 位置補正での原紙水平化スキップの初期値にする(原紙編集モードで上書き可)。
+        is_vector = has_text_layer(genshi_path)
+        store = SurveyDocument.load(genshi_path, None)  # 原紙.json があれば読む
+        if store.survey is not None:
+            return store.survey  # 既存定義の reference_is_vector を尊重(上書きしない)
+        survey = self._build_survey_from(genshi_path)
+        if survey is not None:
+            survey.detection.reference_is_vector = is_vector
+            return survey
+        # 自動生成できない: 空フォームから手で組み立ててもらう。
+        QMessageBox.information(
+            self.window, "原紙の読み取り",
+            "原紙からフォームを自動作成できませんでした"
+            "（スキャン画像で OCR が使えない等）。\n"
+            "空のフォームを開きます。「設問・選択肢を編集…」で設問・選択肢を"
+            "追加し、自由記述は範囲指定してください。",
+        )
+        det = CheckboxDetection()
+        det.reference_is_vector = is_vector
+        return Survey(
+            survey_id=Path(genshi_path).stem,
+            title=Path(genshi_path).stem,
+            questions=[],
+            detection=det,
+            source_pdf=Path(genshi_path).name,
+        )
+
+    def _enter_genshi_edit(
+        self, filled_path: str, genshi_path: str, survey: Survey
+    ) -> None:
+        """原紙PDFを表示し、構造編集＋自由記述の範囲指定を行う編集モードへ入る。
+
+        確定は「✓ この原紙で電子化」(=③電子化ボタン)、取消は Esc。原紙には回答が
+        無いためサイドカーは作らない(_doc_store=None)。差分基準は別インスタンスで保持。
+        """
+        # 差分基準(原紙)を設定。表示用 self.doc とは別インスタンスにする。
+        if self._reference_doc is not None:
+            self._reference_doc.close()
+        self._reference_doc = PdfDocument(genshi_path)
+        self._reference_path = genshi_path
+        self._clean_cache = None
+        survey.detection.use_diff = True
+        self._genshi_edit = {"filled": filled_path, "genshi": genshi_path}
+
+        if self.doc is not None:
+            self.doc.close()
+        self.doc = PdfDocument(genshi_path)
+        self._doc_store = None
+        self._survey = survey
+        self._default_survey = survey
+        self._page_index = -1
+        self._skew = {}
+        if self._skew_action is not None and self._skew_action.isChecked():
+            self._skew_action.setChecked(False)
+        self._skew_mode = False
+        if self._settings_dialog is not None:
+            self._settings_dialog.close()
+            self._settings_dialog = None
+        self._install_form_pane(survey)
+        self._set_digitize_mode(True)
+        # 「原紙は電子PDF」チェックを現在の判定値で初期化(toggleハンドラは抑止)。
+        if self._vector_check is not None:
+            self._vector_check.blockSignals(True)
+            self._vector_check.setChecked(survey.detection.reference_is_vector)
+            self._vector_check.blockSignals(False)
+        self._base_title = (
+            f"アンケート読み込み支援 — {Path(genshi_path).name}（原紙でフォーム編集）"
+        )
+        self._update_title()
+        self._build_thumbnails()
+        if len(self.doc) > 0:
+            self.thumbnail_list.setCurrentRow(0)
+        QMessageBox.information(
+            self.window, "原紙でフォームを編集",
+            "原紙を表示しました。フォームを確認・修正してください。\n\n"
+            "・設問／選択肢の構造: 「② フォーム ▾ → フォーム編集…」\n"
+            "・自由記述の記入範囲: 右ペインの各自由記述欄の「範囲指定」ボタンを押し、"
+            "原紙の上でドラッグして指定\n\n"
+            "編集が済んだら「✓ この原紙で電子化」を押すと、原紙フォームを保存して"
+            "記入済みPDFの読み取りを開始します（Esc で取消）。",
+        )
+
+    def _finish_genshi_edit(self) -> None:
+        """原紙フォーム編集を確定: 原紙.json 保存→位置補正→記入済みPDFを電子化する。"""
+        info = self._genshi_edit
+        if info is None:
+            return
+        self._finish_region_edit()
+        survey = self._survey
+        genshi_path = info["genshi"]
+        filled_path = info["filled"]
+        if survey is not None:
+            self._write_form_json(Path(genshi_path).with_suffix(".json"), survey)
+        self._genshi_edit = None
+        self._set_digitize_mode(False)
+        # 原紙編集表示を閉じてから、記入済みPDFを原紙基準で位置補正(上書き・.bak退避)。
+        if self.doc is not None:
+            self.doc.close()
+            self.doc = None
+        level_ref = not (survey is not None and survey.detection.reference_is_vector)
+        self._align_filled_to_reference(filled_path, genshi_path, level_ref)
+        # 記入済み(補正後)を開き、原紙フォーム＋差分基準を適用してから電子化。
+        self.load_pdf(filled_path)
+        if survey is not None and self.doc is not None:
+            survey.detection.use_diff = True
+            self._apply_survey_to_doc(survey)
+        self._digitize_now()
+
+    def _align_filled_to_reference(
+        self, filled_path: str, genshi_path: str, level_reference: bool = True
+    ) -> None:
+        """記入済みPDFを原紙基準で位置補正(水平化＋平行移動)して上書きする。
+
+        各ページを Hough で絶対水平へ正立化し、原紙との位相相関で平行移動して原紙と
+        同位置へ揃える。level_reference=False(原紙が電子PDF)なら原紙は水平化せず厳密な
+        基準として使う。元PDFは初回のみ .bak.pdf へ退避。失敗しても電子化は続行する。
+        """
+        src = Path(filled_path)
+        bak = src.with_name(f"{src.stem}.bak.pdf")
+        tmp = src.with_name(f"{src.stem}.align_tmp.pdf")
+        progress = QProgressDialog(
+            "原紙に合わせて位置補正中…", None, 0, 0, self.window
+        )
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+
+        def on_page(done: int, n: int) -> None:
+            if progress.maximum() != n:
+                progress.setMaximum(n)
+            progress.setValue(done)
+
+        try:
+            report = write_aligned_pdf(
+                src, genshi_path, tmp, render_scale=3.0,
+                level_reference=level_reference, progress=on_page,
+            )
+        except (OSError, ValueError, RuntimeError) as e:  # noqa: BLE001
+            tmp.unlink(missing_ok=True)
+            progress.close()
+            QMessageBox.warning(
+                self.window, "位置補正",
+                f"位置補正に失敗しました:\n{e}\n補正せずに電子化します。",
+            )
+            return
+        progress.close()
+        if not bak.exists():
+            try:
+                shutil.copy2(src, bak)
+            except OSError as e:
+                tmp.unlink(missing_ok=True)
+                QMessageBox.warning(
+                    self.window, "位置補正",
+                    f"バックアップに失敗しました:\n{e}\n補正せずに電子化します。",
+                )
+                return
+        try:
+            os.replace(tmp, src)
+        except OSError as e:
+            tmp.unlink(missing_ok=True)
+            QMessageBox.warning(self.window, "位置補正", f"上書きに失敗しました:\n{e}")
+            return
+        moved = sum(
+            1 for r in report if r.get("dx") or r.get("dy") or r.get("deg")
+        )
+        sb = self.window.statusBar()
+        if sb is not None:
+            sb.showMessage(
+                f"位置補正: 全{len(report)}ページ中 {moved}ページを補正"
+                f"（原本は {bak.name} に退避）",
+                6000,
+            )
+
+    def _cancel_genshi_edit(self) -> None:
+        """原紙フォーム編集を保存せず取消し、記入済みPDFへ戻る(Esc)。"""
+        info = self._genshi_edit
+        if info is None:
+            return
+        self._finish_region_edit()
+        filled_path = info["filled"]
+        self._genshi_edit = None
+        self._set_digitize_mode(False)
+        self.load_pdf(filled_path)
+        sb = self.window.statusBar()
+        if sb is not None:
+            sb.showMessage("原紙フォームの編集をキャンセルしました（電子化していません）。", 5000)
+
+    def _on_vector_check_toggled(self, checked: bool) -> None:
+        """「原紙は電子PDF」チェックの操作 → 現在のフォーム定義へ反映。"""
+        if self._survey is not None:
+            self._survey.detection.reference_is_vector = checked
+
+    def _set_proof_mode(self, proof: bool) -> None:
+        """作業モードを設定(True=校正/False=自動認識)し、UIを同期する。
+
+        校正モードは「校正作業だけ」を想定し、検出系の「電子化」「検出設定」を不活性
+        化する(誤って再検出・原紙再指定しないため)。原紙編集モード中は「電子化」が
+        確定ボタンを兼ねるので不活性化しない。
+        """
+        self._proof_mode = proof
+        if self._mode_btn is not None:
+            self._mode_btn.setText("モード: 校正 ▾" if proof else "モード: 自動認識 ▾")
+        if self._act_mode_proof is not None:
+            self._act_mode_proof.setChecked(proof)
+        if self._act_mode_auto is not None:
+            self._act_mode_auto.setChecked(not proof)
+        enabled = not proof
+        if self._digitize_btn is not None and self._genshi_edit is None:
+            self._digitize_btn.setEnabled(enabled)
+        if self._settings_btn is not None:
+            self._settings_btn.setEnabled(enabled)
+        # 校正モードでは自由記述の範囲編集(フォーム設定作業)も無効化する。
+        if self.form_pane is not None:
+            self.form_pane.set_region_edit_enabled(enabled)
+
+    def _set_digitize_mode(self, editing: bool) -> None:
+        """原紙編集モードに合わせて、電子化ボタン表示と構造編集ボタンの表示を切替。"""
+        if self._struct_btn is not None:
+            self._struct_btn.setVisible(editing)
+        if self._vector_check is not None:
+            self._vector_check.setVisible(editing)
+        if self._digitize_btn is None:
+            return
+        if editing:
+            self._digitize_btn.setText("✓ この原紙で電子化")
+            self._digitize_btn.setEnabled(True)  # 確定ボタンを兼ねるので常に有効
+            self._digitize_btn.setToolTip(
+                "原紙フォームを保存して記入済みPDFを読み取る（Esc で取消）"
+            )
+        else:
+            self._digitize_btn.setText("電子化")
+            self._digitize_btn.setToolTip("全ページを一括電子化")
+
     def open_split_dialog(self) -> None:
-        """開いているPDF＋フォームを N 分割して配布用チャンクを書き出す。"""
-        if self.doc is None or self._survey is None:
+        """電子化済みの「記入済みPDF＋読み取り結果」を N 分割して配布用に書き出す。"""
+        if self.doc is None or self._survey is None or self._doc_store is None:
             QMessageBox.information(
                 self.window,
                 "分割",
-                "分割するには、PDFを開き、フォーム（作成または読み込み）を"
-                "用意してください。\n各パートに同じフォーム定義を複製します。",
+                "分割するには、PDFを開いてフォームを用意してください。",
             )
             return
-        # 編集中の内容を確定保存してから分割(最新のフォームを配布)
+        # 編集中の内容を確定保存してから分割(最新の結果を配布)
         self._capture_current_page()
         self._save_store()
         dlg = SplitDialog(
-            Path(self.doc.path), self._survey, len(self.doc), self.window
+            Path(self.doc.path), self._survey, len(self.doc), self.window,
+            pages=self._doc_store.pages_dict(),
         )
         self._center_dialog(dlg)
         dlg.exec()
@@ -1176,8 +1513,8 @@ class MainWindowController(QObject):
                 self.window,
                 "検出設定",
                 "フォームが読み込まれていません。\n"
-                "PDFを開くと自動でフォームが作成されます。作成されない場合は"
-                "ツール→「フォーム作成」/「フォーム編集」をご利用ください。",
+                "PDFを開くと原紙PDFを尋ねてフォームを作成します。作成されない場合は"
+                "ツール→「原紙を指定してフォーム作成…」/「フォーム編集」をご利用ください。",
             )
             return
         dlg = self._settings_dialog
@@ -1189,6 +1526,7 @@ class MainWindowController(QObject):
             dlg.valuesChanged.connect(self._on_detection_params_changed)
             dlg.overlayToggled.connect(self._set_overlay_enabled)
             dlg.ratiosToggled.connect(self._set_overlay_ratios)
+            dlg.applyRequested.connect(self.reapply_detection)
             self._settings_dialog = dlg
         self._center_dialog(dlg)
         dlg.show()
@@ -1217,6 +1555,14 @@ class MainWindowController(QObject):
         self._default_survey = survey
         if self.doc is None:
             return
+        if self._genshi_edit is not None:
+            # 原紙フォーム編集モード: サイドカーは作らず(原紙に回答は無い)、フォーム
+            # 定義だけ差し替えて再表示する。原紙.json は「✓ この原紙で電子化」で保存。
+            self._survey = survey
+            self._install_form_pane(survey)
+            if self._page_index >= 0:
+                self._load_page_into_form(self._page_index)
+            return
         store = self._doc_store
         if store is None:
             store = SurveyDocument(self.doc.path, survey)
@@ -1227,98 +1573,29 @@ class MainWindowController(QObject):
         self._install_form_pane(survey)
         if self._page_index >= 0:
             self._load_page_into_form(self._page_index)  # 作成直後は検出せず空表示
-        self._apply_reference_visibility()  # 差分ON/OFFで原紙トグルの有効可否が変わる
         self._save_store()
 
-    def _auto_create_form(self) -> bool:
-        """サイドカーが無いPDFを開いたとき、操作なしでフォームを自動生成・適用する。
+    def _build_survey_from(self, path: str) -> Survey | None:
+        """指定PDFからフォーム定義を生成する。
 
-        テキスト層があればベクタ抽出、無ければ選択中の OCR で生成する。1枚目を
-        クリーンなアンケート用紙(差分の基準)とする運用に合わせ、差分認識
-        (use_diff)を既定で有効にする。生成できれば True、できなければ False。
+        テキスト層があればベクタ抽出、無ければ選択中の OCR で生成。OCR 不可や
+        失敗時は None を返す(呼び出し側がメッセージを出す)。
         """
-        if self.doc is None:
-            return False
-        path = self.doc.path
         try:
             if has_text_layer(path):
-                survey = generate_survey_from_pdf(path)
-            else:
-                backend = self._current_backend()
-                if backend is None:
-                    return False  # OCR 不可: 自動生成できない(編集モードのみ)
-                sb = self.window.statusBar()
-                if sb is not None:
-                    sb.showMessage(
-                        "OCRでフォームを自動作成中…（数十秒かかる場合があります）", 0
-                    )
-                survey = generate_survey_from_scans([path], backend)
-                if sb is not None:
-                    sb.clearMessage()
-        except Exception:  # noqa: BLE001  生成失敗時は編集モードへフォールバック
-            return False
-        # 1枚目クリーン基準の運用に合わせ、差分認識を既定で有効化
-        survey.detection.use_diff = True
-        self._apply_survey_to_doc(survey)
-        return True
-
-    def create_form(self) -> None:
-        """開いているPDFからフォーム定義を生成して適用する。
-
-        PDFが開かれていなければ、まず「PDFを開く」。開かれていれば、その
-        PDFに対してテキスト層の有無で振り分け(あり=ベクトル抽出／なし=OCR)し、
-        生成したフォームを現在の文書へ適用する(校正結果は保持)。
-        """
-        if self.doc is None:
-            # 未読込: まずPDFを開く(その後あらためてフォーム作成を実行)
-            self.open_pdf()
-            return
-
-        path = self.doc.path
-        if has_text_layer(path):
-            survey = generate_survey_from_pdf(path)
-            method = "テキスト抽出"
-            note = ""
-        else:
+                return generate_survey_from_pdf(path)
             backend = self._current_backend()
             if backend is None:
-                # OCR不可の環境(例: Windows で ChromeScreenAI 未導入)。
-                # スキャンからの自動生成は行わず、編集モードのみ提供する。
-                QMessageBox.information(
-                    self.window,
-                    "フォーム作成（編集モードのみ）",
-                    "このPDFはスキャン画像（テキスト層なし）のため、フォームの"
-                    "自動作成には OCR が必要です。現在の環境では利用可能な OCR "
-                    "エンジンがないため、自動作成は行えません。\n\n"
-                    "代わりに次の操作（編集モード）が利用できます：\n"
-                    "・ツール→「フォーム編集」(Ctrl+E)で設問・選択肢を編集する\n"
-                    "・編集したフォームで各ページを校正・保存する\n\n"
-                    "OCRを使うには：\n"
-                    "・macOS: Apple Vision（標準で利用可）\n"
-                    "・Windows/Linux: Chrome screen-ai（locro 導入＋"
-                    "`locro download` でモデル取得。docs/ocr_windows.md 参照）\n"
-                    "導入後、ツール→「OCRエンジン」で選択してください。",
-                )
-                return
+                return None
             sb = self.window.statusBar()
             if sb is not None:
                 sb.showMessage("OCRでフォームを作成中…（数十秒かかる場合があります）", 0)
             survey = generate_survey_from_scans([path], backend)
             if sb is not None:
                 sb.clearMessage()
-            method = f"OCR（{backend.name}）"
-            note = "\n※OCR由来のため座標は粗め。ROIオーバーレイ＋校正で調整してください。"
-
-        # 1枚目クリーン基準の運用に合わせ、差分認識を既定で有効化
-        survey.detection.use_diff = True
-        self._apply_survey_to_doc(survey)
-        n_opt = sum(len(q.options) for q in survey.questions)
-        QMessageBox.information(
-            self.window,
-            "フォーム作成",
-            f"現在のPDFからフォームを作成しました（{method}）。\n"
-            f"設問 {len(survey.questions)} 問 / 選択肢 {n_opt} 個{note}",
-        )
+            return survey
+        except Exception:  # noqa: BLE001  失敗時は None(編集モードへフォールバック)
+            return None
 
     def open_form_editor(self) -> None:
         """構造エディタでフォーム定義(設問・選択肢)を編集する(非モーダル)。"""
@@ -1373,8 +1650,6 @@ class MainWindowController(QObject):
         """パラメータ変更 → 現在ページを再検出してフォーム・オーバーレイを更新。"""
         if self.doc is not None and self._page_index >= 0:
             self._detect_and_fill(self._page_index)
-        # 差分認識のON/OFFで原紙の有無が変わるため、表示状態を再評価
-        self._apply_reference_visibility()
 
     def _set_overlay_enabled(self, enabled: bool) -> None:
         self._overlay_enabled = enabled
@@ -1476,32 +1751,20 @@ class MainWindowController(QObject):
         pane.regionRequested.connect(self.start_region_capture)
         self.form_pane = pane
         pane.setStyleSheet(f"font-size: {self._form_font_pt}pt;")
+        # 校正モードでは範囲編集ボタンを無効化(現在のモードを反映)。
+        pane.set_region_edit_enabled(not self._proof_mode)
         self._form_scroll.setWidget(pane)
 
     # --------------------------------------------------- 校正結果の永続化
-    def _is_reference_page(self, index: int) -> bool:
-        """index が「1枚目クリーン原紙(差分の基準)」か。原紙は回答ではない。
-
-        差分認識ONかつ複数ページのときの先頭ページ(0)のみ True。
-        """
-        return (
-            index == DIFF_REFERENCE_PAGE
-            and self._survey is not None
-            and self._survey.detection.use_diff
-            and self.doc is not None
-            and len(self.doc) > 1
-        )
-
     def _capture_current_page(self) -> None:
         """現在ページのフォーム内容を(メモリ上の)サイドカーへ取り込む。
 
-        1枚目クリーン原紙(差分の基準)は回答ではないので、結果に保存しない。
+        原紙は別PDFなので、開いている記入済みPDFの全ページが回答(=保存対象)。
         """
         if (
             self._doc_store is not None
             and self._page_index >= 0
             and self.form_pane is not None
-            and not self._is_reference_page(self._page_index)
         ):
             self._doc_store.set_results(
                 self._page_index, self.form_pane.get_results()
@@ -1522,9 +1785,36 @@ class MainWindowController(QObject):
         self._capture_current_page()
         if self._doc_store is not None:
             self._autosave_timer.start()  # 連続入力をまとめて書込(500ms)
+            self._track_reviewed_edit()
         # 選択が変わった時だけオーバーレイを更新(自由記述のキー入力では再描画しない)
         if self._overlay_enabled and self._current_selection() != self._overlay_selection_cache:
             self._refresh_overlay()
+
+    def _track_reviewed_edit(self) -> None:
+        """確認済みページの編集を監視し、確認済み時点との差分で確認状態を更新する。
+
+        確認済み時点のスナップショットから変化したら確認済みを解除(ボタンは
+        「✓ 確認済みにする」に戻る／Esc で復帰可能)。元に戻せば自動で確認済みへ復帰。
+        """
+        if (
+            self._doc_store is None
+            or self._page_index < 0
+            or self._confirmed_results is None
+            or self.form_pane is None
+        ):
+            return
+        diverged = self.form_pane.get_results() != self._confirmed_results
+        reviewed = self._doc_store.is_reviewed(self._page_index)
+        if diverged and reviewed:
+            # 確認済みページを編集 → 確認解除(スナップショットは復帰用に保持)
+            self._doc_store.set_reviewed(self._page_index, False)
+            self._refresh_thumb(self._page_index)
+            self._sync_review_btn(False)
+        elif not diverged and not reviewed:
+            # 編集を元に戻した → 確認済みへ復帰
+            self._doc_store.set_reviewed(self._page_index, True)
+            self._refresh_thumb(self._page_index)
+            self._sync_review_btn(True)
 
     def _on_reviewed_toggled(self, reviewed: bool) -> None:
         """フォームの確認済みチェック操作 → 記録・ボタン同期。"""
@@ -1535,16 +1825,62 @@ class MainWindowController(QObject):
         self._apply_reviewed(reviewed, sync_form=True)
 
     def _apply_reviewed(self, reviewed: bool, *, sync_form: bool) -> None:
-        """確認済み状態を記録し、サムネイル印・即保存・両UIの同期を行う。"""
+        """確認済み状態を記録し、サムネイル印・即保存・両UIの同期を行う。
+
+        確認時は現在の結果をスナップショット(確認済み時点)として記録する。
+        確認解除時はスナップショットを破棄する(編集差分の復帰先が無くなる)。
+        """
         if self._doc_store is None or self._page_index < 0:
             return
         self._capture_current_page()
         self._doc_store.set_reviewed(self._page_index, reviewed)
+        if reviewed and self.form_pane is not None:
+            self._confirmed_results = copy.deepcopy(self.form_pane.get_results())
+        elif not reviewed:
+            self._confirmed_results = None
         self._refresh_thumb(self._page_index)
         self._save_store()
         if sync_form and self.form_pane is not None:
             self.form_pane.set_reviewed(reviewed)  # 内部でシグナル抑止
         self._sync_review_btn(reviewed)
+
+    def _on_escape(self) -> None:
+        """Esc の一元処理。傾き補正→原紙編集→確認済み編集の取消、の優先順。"""
+        if self._skew_mode:
+            self._cancel_skew_mode()
+        elif self._genshi_edit is not None:
+            self._cancel_genshi_edit()
+        else:
+            self._revert_reviewed_edit()
+
+    def _revert_reviewed_edit(self) -> bool:
+        """確認済みページの編集を破棄し、確認済み時点の状態へ戻す(Esc)。
+
+        確認済みを編集して差分が出ている(=確認解除されスナップショットがある)ときだけ
+        働く。スナップショットをフォーム・ストアへ復元し、確認済みに戻す。
+        """
+        if (
+            self._doc_store is None
+            or self._page_index < 0
+            or self._confirmed_results is None
+            or self._doc_store.is_reviewed(self._page_index)  # 差分なし=何もしない
+            or self.form_pane is None
+        ):
+            return False
+        snap = copy.deepcopy(self._confirmed_results)
+        self.form_pane.blockSignals(True)
+        self.form_pane.set_results_dict(snap)
+        self.form_pane.blockSignals(False)
+        self._doc_store.set_results(self._page_index, copy.deepcopy(snap))
+        self._doc_store.set_reviewed(self._page_index, True)
+        self._refresh_thumb(self._page_index)
+        self._save_store()
+        self._sync_review_btn(True)
+        self._refresh_overlay()
+        sb = self.window.statusBar()
+        if sb is not None:
+            sb.showMessage("編集を破棄し、確認済みの状態に戻しました。", 4000)
+        return True
 
     def _sync_review_btn(self, reviewed: bool) -> None:
         """確認済みボタンのチェック状態・文言をシグナル無しで同期する。"""
@@ -1587,26 +1923,28 @@ class MainWindowController(QObject):
             self._settings_dialog.close()
             self._settings_dialog = None
 
-        # フォームの決定: サイドカーがあれば復元、無ければ操作なしで自動作成。
+        # フォームの決定: サイドカーがあれば復元。無ければフォーム未設定のまま開き、
+        # 「③電子化」で原紙を指定した時点でフォームを用意する。
         store = SurveyDocument.load(path, None)
         if store.survey is not None:
             self._doc_store = store
             self._survey = store.survey
             self._install_form_pane(self._survey)
+            # 既に電子化済み(サイドカーあり)＝校正段階とみなし校正モードを既定にする。
+            self._set_proof_mode(True)
         else:
-            # サイドカー無し: 1枚目クリーン基準で自動フォーム作成(差分認識ON)。
+            # サイドカー無し: フォーム未設定で開く(電子化時に原紙から用意)。新規＝
+            # まず検出を作る段階なので自動認識モードを既定にする。
             self._doc_store = None
             self._survey = None
-            if not self._auto_create_form():
-                # 自動作成不可(スキャンPDFで OCR 不可など): 編集モードへ案内。
-                self._show_form_placeholder()
-                sb = self.window.statusBar()
-                if sb is not None:
-                    sb.showMessage(
-                        "フォームを自動作成できませんでした（スキャンPDFは OCR エンジンが"
-                        "必要です）。ツール→「フォーム作成」/「フォーム編集」をご利用ください。",
-                        0,
-                    )
+            self._set_proof_mode(False)
+            self._show_form_placeholder()
+            sb = self.window.statusBar()
+            if sb is not None:
+                sb.showMessage(
+                    "「電子化」を押すと、原紙PDFを指定してフォームを用意し読み取ります。",
+                    0,
+                )
 
         self._base_title = f"アンケート読み込み支援 — {Path(path).name}"
         self._update_title()
@@ -1614,8 +1952,6 @@ class MainWindowController(QObject):
 
         if len(self.doc) > 0:
             self.thumbnail_list.setCurrentRow(0)
-        # 原紙(1枚目)の表示状態・トグル有効可否を反映(隠す指定なら先頭を飛ばす)
-        self._apply_reference_visibility()
 
     # ------------------------------------------------------------------ rendering
     def _thumb_text(self, index: int) -> str:
@@ -1726,6 +2062,10 @@ class MainWindowController(QObject):
         reviewed_now = self._doc_store.is_reviewed(index) if self._doc_store else False
         self.form_pane.set_reviewed(reviewed_now)
         self.form_pane.blockSignals(False)
+        # 確認済みページは「確認済み時点」のスナップショットを保持(編集差分・Esc復帰用)。
+        self._confirmed_results = (
+            copy.deepcopy(self.form_pane.get_results()) if reviewed_now else None
+        )
         if self._review_btn is not None:
             self._review_btn.setEnabled(self._doc_store is not None)
         self._sync_review_btn(reviewed_now)
@@ -1755,6 +2095,9 @@ class MainWindowController(QObject):
         reviewed_now = self._doc_store.is_reviewed(index) if self._doc_store else False
         self.form_pane.set_reviewed(reviewed_now)
         self.form_pane.blockSignals(False)
+        self._confirmed_results = (
+            copy.deepcopy(self.form_pane.get_results()) if reviewed_now else None
+        )
         if self._review_btn is not None:
             self._review_btn.setEnabled(self._doc_store is not None)
         self._sync_review_btn(reviewed_now)
@@ -1789,8 +2132,13 @@ class MainWindowController(QObject):
         # 傾き補正モード中はフォーカス枠もページと一緒に回転させる
         if self._skew_mode:
             self._apply_overlay_skew(self._skew_preview_deg)
-        # 拡大表示で枠が画面外なら最小限スクロールして見せる
-        self.pdf_view.ensureVisible(box, 40, 40)
+        # 拡大表示で枠が画面外なら最小限スクロールして見せる。これはフォーム操作
+        # 起因のPDFスクロールなので、相互連動でフォームを巻き戻さないよう抑止する。
+        self._scroll_sync_guard = True
+        try:
+            self.pdf_view.ensureVisible(box, 40, 40)
+        finally:
+            self._scroll_sync_guard = False
 
     # ----------------------------------------------- PDFダブルクリックでトグル
     @staticmethod
@@ -1801,21 +2149,74 @@ class MainWindowController(QObject):
         dy = max(y0 - py, 0.0, py - y1)
         return (dx * dx + dy * dy) ** 0.5
 
+    def _option_marker_rect(self, opt) -> Rect:
+        """当たり判定/表示用のマーカー矩形(box は box_expand で拡大した範囲)。"""
+        if opt.marker_type != MARKER_BOX or self._survey is None:
+            return opt.checkbox
+        be = self._survey.detection.box_expand
+        if not be:
+            return opt.checkbox
+        x0, y0, x1, y1 = opt.checkbox
+        mx, my = (x1 - x0) * be, (y1 - y0) * be
+        return (max(0.0, x0 - mx), max(0.0, y0 - my),
+                min(1.0, x1 + mx), min(1.0, y1 + my))
+
     def _option_at(self, nx: float, ny: float, tol: float = 0.025):
-        """正規化点に最も近い選択肢(box/番号/丸数字)を返す。許容外なら None。"""
+        """正規化点に対応する選択肢を返す。許容外なら None。
+
+        (1) マーカー(box は box_expand 拡大後)への近接ヒット、(2) 該当テキストの
+        クリック=同じ行でクリックより左にある最も近いチェックボックス(ラベルは□の
+        右側に並ぶ前提。右隣の□より手前のクリックのみ)で判定する。
+        """
         if self._survey is None:
             return None
-        best: tuple[str, str] | None = None
+        opts: list[tuple[str, str, Rect]] = []  # (qid, value, checkbox)
+        direct: tuple[str, str] | None = None
         best_d = tol
         for q in self._survey.questions:
             if q.type not in (SINGLE_CHOICE, MULTI_CHOICE):
                 continue
             for opt in q.options:
-                d = self._rect_distance(nx, ny, opt.checkbox)
+                opts.append((q.id, opt.value, opt.checkbox))
+                # (1) マーカー近接(拡大box含む)
+                d = self._rect_distance(nx, ny, self._option_marker_rect(opt))
                 if d < best_d:
                     best_d = d
-                    best = (q.id, opt.value)
-        return best
+                    direct = (q.id, opt.value)
+        if direct is not None:
+            return direct
+        # (2) ラベルクリック: 同じ行でクリックの左にある最も近い□。隣の選択肢を
+        # 拾わないよう、縦は箱高さ±25%、横はラベル相当(□右〜次の□までの隙間の
+        # 左寄り60%・上限0.35)に絞る。
+        pad_y = 0.25  # 行の縦許容(箱高さ比)
+        gap_frac = 0.6  # 次の□までの隙間のうちラベルとみなす割合(左寄り)
+        max_label_w = 0.35  # ラベル到達幅の上限(行末選択肢用・ページ幅比)
+
+        def on_row(y0: float, y1: float) -> bool:
+            bh = y1 - y0
+            return y0 - pad_y * bh <= ny <= y1 + pad_y * bh
+
+        cand: tuple[str, str, Rect] | None = None
+        for qid, value, (x0, y0, x1, y1) in opts:
+            if not on_row(y0, y1):
+                continue  # 同じ行(縦バンド)でない
+            if nx < x0:
+                continue  # クリックは□より左(ラベルは右側のはず)
+            if cand is None or x0 > cand[2][0]:
+                cand = (qid, value, (x0, y0, x1, y1))
+        if cand is None:
+            return None
+        cx0, _, cx1, _ = cand[2]
+        # 右隣の同行□の左端(無ければページ右端)
+        next_x0 = 1.0
+        for _qid, _value, (x0, y0, x1, y1) in opts:
+            if on_row(y0, y1) and x0 > cx0:
+                next_x0 = min(next_x0, x0)
+        # ラベル到達点 = □右端から、隙間の一部 or 上限幅の小さい方まで
+        reach = cx1 + min(gap_frac * max(0.0, next_x0 - cx1), max_label_w)
+        if nx <= reach:
+            return (cand[0], cand[1])
+        return None
 
     def _toggle_option_at(self, view_pos) -> None:
         """ビューポート座標の点に対応する選択肢のチェックをトグルする。"""
@@ -1870,6 +2271,40 @@ class MainWindowController(QObject):
         ):
             self._scene.removeItem(self._highlight_item)
         self._highlight_item = None
+
+    # ----------------------------------------- PDF↔フォームのスクロール相互連動
+    def _on_form_scrolled(self, _value: int) -> None:
+        """右ペイン(読み取り結果)のスクロールに合わせてPDF表示を追従させる。"""
+        self._sync_scroll(
+            self._form_scroll.verticalScrollBar(),
+            self.pdf_view.verticalScrollBar(),
+        )
+
+    def _on_pdf_scrolled(self, _value: int) -> None:
+        """PDF表示のスクロールに合わせて右ペイン(読み取り結果)を追従させる。"""
+        self._sync_scroll(
+            self.pdf_view.verticalScrollBar(),
+            self._form_scroll.verticalScrollBar(),
+        )
+
+    def _sync_scroll(self, src, dst) -> None:
+        """src のスクロール位置(比率)に dst を合わせる。再帰・誘発は抑止する。
+
+        ページ送り・ズーム・フォーカス追従などプログラム起因のスクロールでは
+        相手を動かさない(_scroll_sync_guard / _applying / _zooming を見る)。
+        """
+        if self._scroll_sync_guard or self._applying or self._zooming:
+            return
+        smax = src.maximum()
+        dmax = dst.maximum()
+        if smax <= 0 or dmax <= 0:
+            return  # 一方がスクロール不能(全体表示など)なら連動しない
+        frac = src.value() / smax
+        self._scroll_sync_guard = True
+        try:
+            dst.setValue(round(frac * dmax))
+        finally:
+            self._scroll_sync_guard = False
 
     # --------------------------------------------- 自由記述の記入領域編集(手動)
     def _find_question(self, qid: str):
@@ -2091,7 +2526,9 @@ class MainWindowController(QObject):
                 self._overlay_items.append(gitem)
             res = self._last_results.get(q.id)
             for opt in q.options:
-                x0, y0, x1, y1 = opt.checkbox
+                # box は box_expand だけ判定範囲を外側へ広げるので、赤/灰マーカーも
+                # 同じ範囲(=当たり判定と同一)で描く。
+                x0, y0, x1, y1 = self._option_marker_rect(opt)
                 box = QRectF(x0 * w, y0 * h, (x1 - x0) * w, (y1 - y0) * h)
                 # 選択済み判定はフォーム状態(=集計される確定値)に基づく
                 checked = opt.value in selection.get(q.id, set())
@@ -2438,16 +2875,7 @@ class MainWindowController(QObject):
                         self._insert_dropped_pdf(path, self._drop_index(watched, event))
                     return True
 
-        # 傾き補正モード: Esc で保留中の補正を破棄し、保存せずに抜ける(キャンセル)
-        if (
-            self._skew_mode
-            and on_pdf
-            and isinstance(event, QKeyEvent)
-            and et == QEvent.Type.KeyPress
-            and event.key() == Qt.Key.Key_Escape
-        ):
-            self._cancel_skew_mode()
-            return True
+        # Esc キーは _on_escape(ウィンドウのショートカット)で一元処理する。
 
         # 傾き補正モード: ビューポート上のドラッグでページを中心回転
         if (

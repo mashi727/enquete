@@ -60,6 +60,10 @@ class SurveyDocument:
     def reviewed_indices(self) -> set[int]:
         return {int(k) for k, v in self._pages.items() if v.get("reviewed")}
 
+    def pages_dict(self) -> dict[str, dict]:
+        """全ページの校正結果(index文字列 -> {results, reviewed})の複製を返す。"""
+        return {k: dict(v) for k, v in self._pages.items()}
+
     def shift_pages(self, insert_at: int, count: int) -> None:
         """insert_at 以降のページ結果を count ぶん後ろへずらす(ページ挿入時)。
 

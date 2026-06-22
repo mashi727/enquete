@@ -321,6 +321,9 @@ class FormPane(QWidget):
         row.installEventFilter(self)  # 行クリックでトグル
         if hover is not None:
             self._option_widgets[row] = hover  # Enter/Leave でROI強調
+            # ボタン自身もフォーカス連動の対象に(クリック/Tab移動でPDFが追従)。
+            self._option_widgets[button] = hover
+            button.installEventFilter(self)
         return row
 
     def _next_text_editor(self, current: QObject, forward: bool):
@@ -364,13 +367,24 @@ class FormPane(QWidget):
             and isinstance(event, QMouseEvent)
             and event.button() == Qt.MouseButton.LeftButton
         ):
-            self._option_buttons[watched].click()
+            btn = self._option_buttons[watched]
+            btn.setFocus(Qt.FocusReason.MouseFocusReason)  # PDF を対応箇所へ追従
+            btn.click()
             return True
-        if et == QEvent.Type.Enter and watched in self._option_widgets:
+        # 選択肢: ホバー(Enter/Leave)に加え、フォーカス(クリック/Tab)でもPDFを追従。
+        # 校正中はフォーカス中の項目を強調し続け、外れたときだけ消す。
+        if watched in self._option_widgets and et in (
+            QEvent.Type.Enter,
+            QEvent.Type.FocusIn,
+        ):
             qid, value = self._option_widgets[watched]
             self.optionHovered.emit(qid, value)
-        elif et == QEvent.Type.Leave and watched in self._option_widgets:
-            self.optionHoverEnded.emit()
+        elif watched in self._option_widgets and et in (
+            QEvent.Type.Leave,
+            QEvent.Type.FocusOut,
+        ):
+            if not self._option_active(watched):
+                self.optionHoverEnded.emit()
         elif watched in self._text_widgets and et in (
             QEvent.Type.Enter,
             QEvent.Type.Leave,
@@ -383,6 +397,17 @@ class FormPane(QWidget):
             else:
                 self.optionHoverEnded.emit()
         return super().eventFilter(watched, event)
+
+    def _option_active(self, watched: QObject) -> bool:
+        """選択肢(行 or ボタン)が、まだフォーカス中かホバー中か。
+
+        行(row)が watched のときは対応ボタンのフォーカスも見る。どちらかが生きて
+        いれば強調を維持する(クリック直後に Leave で消えてしまうのを防ぐ)。
+        """
+        btn = self._option_buttons.get(watched, watched)
+        focused = isinstance(btn, QWidget) and btn.hasFocus()
+        hovered = isinstance(watched, QWidget) and watched.underMouse()
+        return bool(focused or hovered)
 
     # -------------------------------------------------------------- detection
     def set_detection(self, results: dict[str, QuestionResult]) -> None:
@@ -446,6 +471,14 @@ class FormPane(QWidget):
         ラジオ未生成（自由記述なし）の場合も True（=全件側）を既定とする。
         """
         return self._rescope_all_btn is None or self._rescope_all_btn.isChecked()
+
+    def set_region_edit_enabled(self, enabled: bool) -> None:
+        """自由記述の「範囲を編集」ボタンの有効/無効を一括で切り替える。
+
+        校正モード(校正作業のみ)では範囲編集はフォーム設定の作業なので無効化する。
+        """
+        for btn in self._region_buttons.values():
+            btn.setEnabled(enabled)
 
     def set_region_editing(self, active_qid: str | None) -> None:
         """「範囲を編集」トグルの表示状態を同期する(編集中の設問だけ押下状態)。

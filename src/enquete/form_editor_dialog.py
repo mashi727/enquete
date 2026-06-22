@@ -326,3 +326,11 @@ class FormEditorDialog(QDialog):
     # ---------------------------------------------------------------- apply
     def _emit_applied(self) -> None:
         self.applied.emit(copy.deepcopy(self._survey))
+
+    def current_survey(self) -> Survey:
+        """現在の編集内容(作業コピー)のディープコピーを返す。
+
+        モーダルで使う場合、「適用」を押していなくても閉じた時点の編集結果を
+        確実に取得できる。
+        """
+        return copy.deepcopy(self._survey)

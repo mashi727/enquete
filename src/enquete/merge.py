@@ -77,15 +77,19 @@ def split_pdf(
     survey: Survey,
     n_parts: int,
     out_dir: str | Path,
+    pages: dict[str, dict] | None = None,
 ) -> list[Path]:
     """PDF を n_parts に分割し、各チャンクの PDF とサイドカーJSON を書き出す。
 
     各チャンクJSONには同一 survey を複製し、由来メタデータ split{} を埋め込む。
-    戻り値はチャンク PDF のパス一覧(順序通り)。
+    pages(電子化済みの読み取り結果 index文字列->{results,reviewed})が与えられた
+    場合、各チャンクの担当ページの結果を 0 始まりに振り直して同梱する
+    (担当者はそれを校正・修正して JSON を返す)。戻り値はチャンク PDF のパス一覧。
     """
     pdf_path = Path(pdf_path)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    pages = pages or {}
     src = pdfium.PdfDocument(str(pdf_path))
     try:
         total = len(src)
@@ -104,11 +108,20 @@ def split_pdf(
             with open(out_pdf, "wb") as fh:
                 dst.save(fh)
             dst.close()
-            # サイドカーJSON: フォーム複製＋由来メタ＋空ページ
+            # 担当ページの読み取り結果を 0 始まりへ振り直して同梱
+            chunk_pages: dict[str, dict] = {}
+            for k, rec in pages.items():
+                try:
+                    idx = int(k)
+                except (TypeError, ValueError):
+                    continue
+                if offset <= idx < offset + count:
+                    chunk_pages[str(idx - offset)] = dict(rec)
+            # サイドカーJSON: フォーム複製＋由来メタ＋(電子化済みなら)結果
             data = {
                 "source_pdf": out_pdf.name,
                 "survey": survey_dict,
-                "pages": {},
+                "pages": chunk_pages,
                 "split": {
                     "original_pdf": pdf_path.name,
                     "page_offset": offset,

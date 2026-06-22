@@ -40,6 +40,7 @@ class SplitDialog(QDialog):
     def __init__(
         self, pdf_path: Path, survey: Survey, total_pages: int,
         parent: QWidget | None = None,
+        pages: dict[str, dict] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("アンケートを分割")
@@ -47,6 +48,7 @@ class SplitDialog(QDialog):
         self._pdf_path = pdf_path
         self._survey = survey
         self._total = total_pages
+        self._pages = pages or {}
         self.result_paths: list[Path] = []
 
         self._spin = QSpinBox()
@@ -81,13 +83,19 @@ class SplitDialog(QDialog):
         buttons.accepted.connect(self._run)
         buttons.rejected.connect(self.reject)
 
-        layout = QVBoxLayout(self)
-        layout.addWidget(
-            QLabel(
-                "PDF を均等に分割し、各パートに同じフォーム定義を複製します"
-                "（ページ結果は空）。各担当に配布して校正後、マージで統合します。"
-            )
+        n_res = sum(1 for v in self._pages.values() if v.get("results"))
+        msg = (
+            "電子化済みの「記入済みPDF＋読み取り結果」を均等に分割します。"
+            "各パートには PDF・フォーム定義・担当ページの読み取り結果を同梱します。\n"
+            "各担当は　ファイル名を変えずに　結果を校正・修正し、JSON を返送 → "
+            "「アンケートをマージ」で統合します。"
         )
+        if n_res == 0:
+            msg += "\n⚠ 読み取り結果がまだありません。先に「③電子化」を実行してください。"
+        info = QLabel(msg)
+        info.setWordWrap(True)
+        layout = QVBoxLayout(self)
+        layout.addWidget(info)
         layout.addLayout(top)
         layout.addWidget(self._preview, 1)
         layout.addLayout(out_row)
@@ -120,7 +128,8 @@ class SplitDialog(QDialog):
             return
         try:
             self.result_paths = M.split_pdf(
-                self._pdf_path, self._survey, self._spin.value(), out_dir
+                self._pdf_path, self._survey, self._spin.value(), out_dir,
+                pages=self._pages,
             )
         except (ValueError, OSError) as e:
             QMessageBox.critical(self, "分割", f"分割に失敗しました:\n{e}")
