@@ -1,11 +1,13 @@
-"""アンケート(PDF＋サイドカーJSON)の分割・マージ。
+"""アンケート(結果を埋め込んだ自己完結PDF)の分割・マージ。
 
 手分け作業のため、1つの調査PDFを重複なしのチャンクに**分割**して配布し、
-各担当が校正した結果を1つに**マージ**する。サイドカーJSONはページ結果を
-PDFのページ番号で索引するため、マージでは PDF を連結しつつ JSON のページ
-番号を連結順のオフセットへ付け替える(PDFを連結しないと番号が破綻する)。
+各担当が校正した結果を1つに**マージ**する。結果はページ結果を PDF のページ
+番号で索引するため、マージでは PDF を連結しつつ各ページ番号を連結順のオフセット
+へ付け替える(PDFを連結しないと番号が破綻する)。チャンク・統合物とも、結果と
+原紙基準画像を PDF 自身へ埋め込む(サイドカーJSONは作らない)。
 
-Qt 非依存。PDF 連結は pypdfium2(BSD) の import_pages/save を用いる。
+Qt 非依存。PDF 連結は pypdfium2(BSD) の import_pages/save、埋め込み/抽出は
+pikepdf(QPDF) を用いる。
 """
 from __future__ import annotations
 
@@ -15,6 +17,7 @@ from pathlib import Path
 
 import pypdfium2 as pdfium
 
+from enquete import pdf_embed
 from enquete.schema import Survey, survey_from_dict, survey_to_dict
 
 
@@ -78,13 +81,13 @@ def split_pdf(
     n_parts: int,
     out_dir: str | Path,
     pages: dict[str, dict] | None = None,
+    baseline_png: bytes | None = None,
 ) -> list[Path]:
-    """PDF を n_parts に分割し、各チャンクの PDF とサイドカーJSON を書き出す。
+    """PDF を n_parts に分割し、各チャンクを「結果を埋め込んだ自己完結PDF」で書き出す。
 
-    各チャンクJSONには同一 survey を複製し、由来メタデータ split{} を埋め込む。
-    pages(電子化済みの読み取り結果 index文字列->{results,reviewed})が与えられた
-    場合、各チャンクの担当ページの結果を 0 始まりに振り直して同梱する
-    (担当者はそれを校正・修正して JSON を返す)。戻り値はチャンク PDF のパス一覧。
+    各チャンクPDFに同一 survey・担当ページの結果(0始まりに振り直し)・由来メタ split{}・
+    原紙基準画像を**埋め込む**(サイドカーJSONは作らない)。担当者はチャンクPDFを開いて
+    校正し、PDFごと or 提出JSONで返す。戻り値はチャンク PDF のパス一覧。
     """
     pdf_path = Path(pdf_path)
     out_dir = Path(out_dir)
@@ -101,7 +104,6 @@ def split_pdf(
             part = i + 1
             part_stem = _part_stem(stem, part, n_parts)
             out_pdf = out_dir / f"{part_stem}.pdf"
-            out_json = out_dir / f"{part_stem}.json"
             # PDF: 該当ページ範囲を新規ドキュメントへインポートして保存
             dst = pdfium.PdfDocument.new()
             dst.import_pages(src, pages=list(range(offset, offset + count)))
@@ -117,7 +119,7 @@ def split_pdf(
                     continue
                 if offset <= idx < offset + count:
                     chunk_pages[str(idx - offset)] = dict(rec)
-            # サイドカーJSON: フォーム複製＋由来メタ＋(電子化済みなら)結果
+            # チャンクPDFへ埋め込み: フォーム複製＋由来メタ＋(電子化済みなら)結果
             data = {
                 "source_pdf": out_pdf.name,
                 "survey": survey_dict,
@@ -130,9 +132,8 @@ def split_pdf(
                     "parts": n_parts,
                 },
             }
-            out_json.write_text(
-                json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
+            pdf_embed.write_data(
+                out_pdf, data, baseline_png=baseline_png, backup=False
             )
             out_paths.append(out_pdf)
         return out_paths
@@ -166,24 +167,33 @@ class MergeInput:
             doc.close()
 
 
-def load_merge_input(json_path: str | Path) -> MergeInput:
-    """サイドカーJSONを読み、対応するチャンクPDFを解決して MergeInput を返す。
+def load_merge_input(path: str | Path) -> MergeInput:
+    """マージ入力(チャンクPDF or 提出JSON)を読み、MergeInput を返す。
 
-    PDF は sidecar の source_pdf(同ディレクトリ) を優先し、無ければ JSON と
-    同名(同 stem)の .pdf を探す。
+    - PDF を渡した場合: 埋め込み結果(enquete-data.json)を読む。
+    - JSON を渡した場合(提出JSON/旧サイドカー): source_pdf(同ディレクトリ)を優先し、
+      無ければ同名(同 stem)の .pdf を探して対応 PDF を解決する。
     """
-    json_path = Path(json_path)
-    sidecar = json.loads(json_path.read_text(encoding="utf-8"))
-    src_name = sidecar.get("source_pdf")
+    path = Path(path)
+    if path.suffix.lower() == ".pdf":
+        data = pdf_embed.read_data(path)
+        if data is None:
+            raise ValueError(
+                f"{path.name} に埋め込みの読み取り結果がありません"
+                "(電子化済みのPDFを指定してください)。"
+            )
+        return MergeInput(pdf_path=path, sidecar=data)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    src_name = data.get("source_pdf")
     candidates = []
     if isinstance(src_name, str) and src_name:
-        candidates.append(json_path.parent / src_name)
-    candidates.append(json_path.with_suffix(".pdf"))
+        candidates.append(path.parent / src_name)
+    candidates.append(path.with_suffix(".pdf"))
     for cand in candidates:
         if cand.exists():
-            return MergeInput(pdf_path=cand, sidecar=sidecar)
+            return MergeInput(pdf_path=cand, sidecar=data)
     raise FileNotFoundError(
-        f"{json_path.name} に対応する PDF が見つかりません"
+        f"{path.name} に対応する PDF が見つかりません"
         f"(探索: {', '.join(str(c.name) for c in candidates)})。"
     )
 
@@ -258,7 +268,6 @@ def order_and_validate(
 @dataclass
 class MergeResult:
     out_pdf: Path
-    out_json: Path
     total_pages: int
     total_results: int
     reviewed_count: int
@@ -271,13 +280,13 @@ def merge_documents(
     *,
     allow_partial: bool = False,
 ) -> MergeResult:
-    """チャンク群を連結 PDF ＋ 統合 JSON にマージして書き出す。
+    """チャンク群を連結し、統合結果を埋め込んだ自己完結 PDF を書き出す。
 
     survey は先頭入力を正とし、相違があれば警告。ページレコード(results,
-    reviewed)は連結順のオフセットで付け替えて1つの pages へ統合する。
+    reviewed)は連結順のオフセットで付け替えて1つの pages へ統合し、原紙基準画像
+    (先頭チャンクの埋め込み)も引き継いで PDF へ埋め込む(サイドカーJSONは作らない)。
     """
     out_pdf = Path(out_pdf)
-    out_json = out_pdf.with_suffix(".json")
     ordered, warnings = order_and_validate(inputs, allow_partial=allow_partial)
 
     # survey の一致確認(先頭を正とする)
@@ -336,12 +345,11 @@ def merge_documents(
         "survey": survey_to_dict(survey),
         "pages": merged_pages,
     }
-    out_json.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+    # 原紙基準画像は先頭チャンクの埋め込みを引き継ぐ(再電子化を自己完結にするため)。
+    baseline_png = pdf_embed.read_baseline(ordered[0].pdf_path)
+    pdf_embed.write_data(out_pdf, data, baseline_png=baseline_png, backup=False)
     return MergeResult(
         out_pdf=out_pdf,
-        out_json=out_json,
         total_pages=total_pages,
         total_results=total_results,
         reviewed_count=reviewed_count,

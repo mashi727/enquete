@@ -13,9 +13,9 @@ GitHub Actions（[`.github/workflows/build.yml`](../.github/workflows/build.yml)
 - **リリース**: `v*` タグを push すると同じ生成物が **GitHub Release に添付**されます。
 
 ```bash
-git tag v0.1.6
-git push origin v0.1.6   # → Actions が走り、Release に成果物が付く
-# あるいは: gh release create v0.1.6 --title "enquete v0.1.6" --notes "..."
+git tag v0.1.8
+git push origin v0.1.8   # → Actions が走り、Release に成果物が付く
+# あるいは: gh release create v0.1.8 --title "enquete v0.1.8" --notes "..."
 ```
 
 ## ローカルビルド
@@ -38,7 +38,8 @@ uv run pyinstaller enquete.spec --noconfirm
 ## 同梱方針
 
 - 実行時に読む `src/enquete/ui/main_window.ui`・アプリアイコン、pypdfium2 の
-  ネイティブライブラリ（libpdfium）、Pillow を同梱します。
+  ネイティブライブラリ（libpdfium）、結果を PDF へ埋め込む `pikepdf`（QPDF/MPL-2.0・
+  ネイティブ libqpdf を含む。`lxml` ともども `collect_all` で収集）、Pillow を同梱します。
 - **macOS**: Apple Vision OCR（`ocrmac` + pyobjc）を同梱 → 追加導入なしで OCR 可能。
 - **Windows**: Windows 標準 OCR（`winsdk`）を `winocr` extra として同梱。
 - **screen-ai（`locro`・MIT ラッパ）は同梱**します（外部依存は Pillow のみ）。

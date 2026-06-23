@@ -1,8 +1,9 @@
 """分割(Split)・マージ(Merge)ダイアログ。
 
-- SplitDialog: 開いている PDF＋フォームを N 分割し、各チャンク(PDF＋同一
-  フォームを複製した JSON)を出力する。手分け作業のための配布物を作る。
-- MergeDialog: 各担当が校正したチャンク(サイドカーJSON)を集め、PDFを連結
+- SplitDialog: 開いている PDF＋フォームを N 分割し、各チャンク(フォーム定義・
+  担当ページの結果・原紙基準画像を埋め込んだ自己完結PDF)を出力する。手分け作業
+  のための配布物を作る。
+- MergeDialog: 各担当が校正したチャンク(PDF or 提出JSON)を集め、PDFを連結
   しつつページ番号をオフセット付け替えして1つに統合する。
 
 実処理は Qt 非依存の enquete.merge に委譲する。
@@ -41,6 +42,7 @@ class SplitDialog(QDialog):
         self, pdf_path: Path, survey: Survey, total_pages: int,
         parent: QWidget | None = None,
         pages: dict[str, dict] | None = None,
+        baseline_png: bytes | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("アンケートを分割")
@@ -49,6 +51,7 @@ class SplitDialog(QDialog):
         self._survey = survey
         self._total = total_pages
         self._pages = pages or {}
+        self._baseline_png = baseline_png
         self.result_paths: list[Path] = []
 
         self._spin = QSpinBox()
@@ -129,7 +132,7 @@ class SplitDialog(QDialog):
         try:
             self.result_paths = M.split_pdf(
                 self._pdf_path, self._survey, self._spin.value(), out_dir,
-                pages=self._pages,
+                pages=self._pages, baseline_png=self._baseline_png,
             )
         except (ValueError, OSError) as e:
             QMessageBox.critical(self, "分割", f"分割に失敗しました:\n{e}")
@@ -144,7 +147,7 @@ class SplitDialog(QDialog):
 
 
 class MergeDialog(QDialog):
-    """チャンク(サイドカーJSON)を集めて連結・統合するダイアログ。"""
+    """チャンク(PDF or 提出JSON)を集めて連結・統合PDFを書き出すダイアログ。"""
 
     def __init__(self, parent: QWidget | None = None, start_dir: str | None = None) -> None:
         super().__init__(parent)
@@ -158,7 +161,7 @@ class MergeDialog(QDialog):
             QAbstractItemView.SelectionMode.ExtendedSelection
         )
 
-        add_btn = QPushButton("JSONを追加…")
+        add_btn = QPushButton("PDF/JSONを追加…")
         add_btn.clicked.connect(self._add_files)
         rm_btn = QPushButton("削除")
         rm_btn.clicked.connect(self._remove_selected)
@@ -196,7 +199,7 @@ class MergeDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(
             QLabel(
-                "各担当が校正したチャンクのサイドカーJSONを追加してください。"
+                "各担当が校正したチャンクPDF（または提出JSON）を追加してください。"
                 "由来メタがあれば順序は自動整列できます。"
             )
         )
@@ -209,8 +212,8 @@ class MergeDialog(QDialog):
     # ----------------------------------------------------------- list ops
     def _add_files(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "チャンクのサイドカーJSONを選択", self._start_dir,
-            "Sidecar JSON (*.json)",
+            self, "チャンクのPDF/提出JSONを選択", self._start_dir,
+            "チャンク (*.pdf *.json);;PDF (*.pdf);;提出/サイドカー JSON (*.json)",
         )
         existing = {self._list.item(i).data(Qt.ItemDataRole.UserRole)
                     for i in range(self._list.count())}

@@ -14,7 +14,10 @@ import shutil
 from pathlib import Path
 
 from PySide6.QtCore import (
+    QBuffer,
+    QByteArray,
     QEvent,
+    QIODevice,
     QObject,
     QPointF,
     QRectF,
@@ -101,6 +104,7 @@ from enquete.schema import (
     Survey,
     survey_to_dict,
 )
+from enquete import pdf_embed
 from enquete.store import SurveyDocument
 
 UI_PATH = Path(__file__).resolve().parent / "ui" / "main_window.ui"
@@ -196,7 +200,7 @@ class MainWindowController(QObject):
         # サムネイルの元ピクスマップ(確認済みハッチ合成の再生成用)
         self._thumb_base: list[QPixmap] = []
         self._base_title = "アンケート読み込み支援"
-        # 全面オートセーブ: フォーム編集はサイドカーJSONへ即時保存する。
+        # 全面オートセーブ: 校正・フォーム編集は記入済みPDFへ即時埋め込み保存する。
         # 自由記述はキー入力ごとに発火するため、短いデバウンスで書込を間引く。
         self._autosave_timer = QTimer(self)
         self._autosave_timer.setSingleShot(True)
@@ -268,6 +272,8 @@ class MainWindowController(QObject):
         self._act_mode_auto: QAction | None = None
         self._act_mode_proof: QAction | None = None
         self._settings_btn: QPushButton | None = None  # 検出設定ボタン(校正で不活性)
+        self._submit_btn: QPushButton | None = None  # 提出用JSON書き出し(全✓で有効)
+        self._genshi_status_label: QLabel | None = None  # 原紙の読込状態(ステータスバー)
         # 起動時はPDF未読込のためフォームは出さず、プレースホルダのみ表示。
         self.form_pane: FormPane | None = None
         self._show_form_placeholder()
@@ -703,6 +709,14 @@ class MainWindowController(QObject):
         review_btn.toggled.connect(self._on_review_btn_toggled)
         self._review_btn = review_btn
         h.addWidget(review_btn)
+        h.addWidget(sep())
+        # 提出用JSONの書き出し。全ページを確認済みにすると有効になる。
+        self._submit_btn = btn(
+            "提出用に書き出す", self.export_submission_json,
+            "全ページを確認済みにすると有効。読み取り結果を提出用 JSON に書き出します。",
+        )
+        self._submit_btn.setEnabled(False)
+        h.addWidget(self._submit_btn)
         # 校正結果は全面オートセーブのため、明示保存ボタンは置かない。
         # 分割/マージは頻度が低いため、バーには出さずツールメニューに残す
 
@@ -776,28 +790,69 @@ class MainWindowController(QObject):
         return self._rotate_qimage(image, self._skew.get(index, 0.0))
 
     # ----------------------------------------------------------- 差分検出
+    def _has_baseline(self) -> bool:
+        """差分の基準(原紙)が使えるか。原紙セッション中の原紙PDF、または
+        PDFに埋め込まれた基準画像のどちらか。"""
+        return self._reference_doc is not None or (
+            self._doc_store is not None and self._doc_store.baseline_png is not None
+        )
+
     def _use_diff_for(self, index: int) -> bool:
         """このページで差分検出を使うか。
 
-        差分の基準は別PDFで指定した原紙。原紙が指定され、設定が差分ONなら、
-        全ページ(記入済み)を原紙との差分で判定する(ページ番号の特別扱いはしない)。
+        差分の基準は原紙。原紙PDF(指定セッション中)か、記入済みPDFに埋め込まれた
+        基準画像があり、設定が差分ONなら、全ページを原紙との差分で判定する。
         """
         return (
             self._survey is not None
             and self._survey.detection.use_diff
-            and self._reference_doc is not None
+            and self._has_baseline()
             and self.doc is not None
         )
 
     def _clean_gray(self, scale: float):
-        """差分の基準＝別指定の原紙PDFの1ページ目をグレースケールで返す(scale毎にキャッシュ)。"""
-        if self._reference_doc is None:
-            return None
+        """差分の基準(原紙)をグレースケールで返す(scale毎にキャッシュ)。
+
+        原紙セッション中は原紙PDFの1ページ目を直接レンダリング。それ以外は記入済み
+        PDFに埋め込まれた基準画像を、現ページのレンダリング寸法へ合わせて復元する。
+        """
         if self._clean_cache is not None and abs(self._clean_cache[0] - scale) < 1e-9:
             return self._clean_cache[1]
-        gray = qimage_to_gray(self._reference_doc.render(0, scale=scale))
+        gray = None
+        if self._reference_doc is not None:
+            gray = qimage_to_gray(self._reference_doc.render(0, scale=scale))
+        elif (
+            self._doc_store is not None
+            and self._doc_store.baseline_png is not None
+            and self.doc is not None
+        ):
+            # 埋め込み基準画像(PNG)をページ0のレンダリング寸法へ合わせて復元。
+            base = QImage()
+            base.loadFromData(QByteArray(self._doc_store.baseline_png), "PNG")
+            if not base.isNull():
+                ref = self.doc.render(0, scale=scale)
+                base = base.scaled(
+                    ref.width(), ref.height(),
+                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                gray = qimage_to_gray(base)
+        if gray is None:
+            return None
         self._clean_cache = (scale, gray)
         return gray
+
+    def _render_reference_baseline_png(self) -> bytes | None:
+        """原紙PDF(差分基準)の1ページ目をPNGバイト列にして返す(埋め込み用)。"""
+        if self._reference_doc is None:
+            return None
+        img = self._reference_doc.render(0, scale=DIGITIZE_RENDER_SCALE)
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        img.save(buf, "PNG")
+        buf.close()
+        return ba.data()
 
     # --- 傾き補正モード(グリッド＋ドラッグ回転) -------------------------------
     def _toggle_skew_mode(self, on: bool) -> None:
@@ -1094,12 +1149,12 @@ class MainWindowController(QObject):
         return cb_reviewed.isChecked(), cb_overwrite.isChecked()
 
     def run_digitize_all(self) -> None:
-        """全ページを設問種別ごとの最適方式で一括電子化し、サイドカーへ保存する。
+        """「電子化」ボタンの本体。状況に応じて自動で動作を切り替える。
 
-        電子化の直前に「原紙を指定するか」を尋ねる。原紙を指定すると、原紙PDFを
-        表示した編集モードに入り、構造編集＋自由記述の範囲指定を行える。「✓ この原紙
-        で電子化」で原紙.jsonを保存→記入済みPDFに戻って読み取る。指定しない場合は
-        現在のフォームでそのまま読み取る。
+        - 原紙フォーム編集中: 「✓ この原紙で電子化」＝編集を確定して読み取り。
+        - 原紙が未指定(フォーム無し): 原紙PDFを指定→編集モードへ。
+        - 原紙が指定済み(フォームあり): 検出設定の「適用（再電子化）」と同じ＝全ページを
+          現在の検出設定・差分基準で再検出する(原紙の再指定は尋ねない)。
         """
         # 原紙フォーム編集中に押された場合 = 「確定して電子化」。
         if self._genshi_edit is not None:
@@ -1111,37 +1166,49 @@ class MainWindowController(QObject):
                 "電子化するには、まず「開く」で記入済みアンケートPDFを開いてください。",
             )
             return
+        # 原紙指定済み(フォームあり) → 再検出(検出設定の「適用」と同じ挙動)。
+        if self._survey is not None and self._doc_store is not None:
+            self.reapply_detection()
+            return
+        # 原紙が未指定 → 原紙PDFを指定して編集モードへ。
+        path = self._pick_reference_pdf()
+        if path is None:
+            return
+        survey = self._obtain_reference_survey(path)
+        if survey is None:
+            return
+        self._enter_genshi_edit(str(self.doc.path), path, survey)
 
-        # --- 原紙(=フォーム定義＋差分基準)を指定するか尋ねる -------------------
-        choice = self._ask_reference_choice()
-        if choice is None:
-            return  # キャンセル
-        if choice == "specify":
-            start = self._reference_path or str(Path.cwd())
+    def _pick_reference_pdf(self) -> str | None:
+        """原紙PDFを選ぶ。複数ページなら警告して選び直しを促す(原紙は1ページ前提)。"""
+        start = self._reference_path or str(Path.cwd())
+        while True:
             path, _ = QFileDialog.getOpenFileName(
-                self.window, "原紙（クリーンなアンケート用紙）PDFを選択",
+                self.window, "原紙（クリーンなアンケート用紙・1ページ）PDFを選択",
                 start, "PDF Files (*.pdf *.PDF)",
             )
             if not path:
-                return
-            survey = self._obtain_reference_survey(path)
-            if survey is None:
-                return
-            # 原紙を表示してフォーム編集できるモードへ。確定は「✓ この原紙で電子化」。
-            self._enter_genshi_edit(str(self.doc.path), path, survey)
-            return
-        # 指定しない: 現在のフォームでそのまま電子化。
-        if self._survey is None or self._doc_store is None:
-            QMessageBox.information(
-                self.window, "電子化",
-                "この記入済みPDFにはまだフォームがありません。\n"
-                "「原紙を指定」を選び、原紙PDFからフォームを用意してください。",
-            )
-            return
-        self._digitize_now()
+                return None
+            try:
+                doc = PdfDocument(path)
+                n = len(doc)
+                doc.close()
+            except Exception as e:  # noqa: BLE001
+                QMessageBox.warning(self.window, "原紙を指定", f"PDFを開けませんでした:\n{e}")
+                start = str(Path(path).parent)
+                continue
+            if n != 1:
+                QMessageBox.warning(
+                    self.window, "原紙を指定",
+                    f"原紙は1ページのPDFを指定してください（選択したPDFは {n} ページあります）。\n"
+                    "記入済みアンケートやページ数の多いPDFを誤って選んでいないかご確認ください。",
+                )
+                start = str(Path(path).parent)
+                continue
+            return path
 
     def _digitize_now(self) -> None:
-        """現在のフォーム・差分基準で全ページを一括電子化し、サイドカーへ保存する。"""
+        """現在のフォーム・差分基準で全ページを一括電子化し、PDFへ埋め込み保存する。"""
         if self.doc is None or self._survey is None or self._doc_store is None:
             return
         opts = self._ask_digitize_options(len(self.doc), self._current_backend())
@@ -1207,41 +1274,19 @@ class MainWindowController(QObject):
             "電子化完了",
             f"{processed} ページを電子化しました"
             + (f"（確認済み {skipped} ページはスキップ）" if skipped else "")
-            + f"。\n結果はサイドカー（{self._doc_store.json_path.name}）に保存しました。",
+            + f"。\n結果は PDF（{self._doc_store.pdf_path.name}）に埋め込み保存しました。",
         )
-
-    def _ask_reference_choice(self) -> str | None:
-        """電子化の直前、原紙を指定するか尋ねる。'specify'/'skip'/None(キャンセル)。"""
-        box = QMessageBox(self.window)
-        box.setWindowTitle("電子化 — 原紙の指定")
-        box.setIcon(QMessageBox.Icon.Question)
-        box.setText("この記入済みPDFの電子化に使うフォーム（原紙）を指定しますか？")
-        box.setInformativeText(
-            "・原紙を指定: 原紙PDFのフォームで電子化します"
-            "（同名サイドカーJSONがあれば再利用、無ければ原紙を読み取り→編集→保存）。"
-            "原紙との差分でチェックを判定します。\n"
-            "・指定しない: いま読み込み済みのフォームで電子化します。"
-        )
-        b_spec = box.addButton("原紙を指定", QMessageBox.ButtonRole.AcceptRole)
-        box.addButton("指定しない", QMessageBox.ButtonRole.NoRole)
-        b_cancel = box.addButton("キャンセル", QMessageBox.ButtonRole.RejectRole)
-        box.setDefaultButton(b_spec)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked is b_cancel or clicked is None:
-            return None
-        return "specify" if clicked is b_spec else "skip"
 
     def _obtain_reference_survey(self, genshi_path: str) -> Survey | None:
         """原紙のフォーム定義(初期値)を得る。編集はこの後の原紙表示モードで行う。
 
-        原紙.json があればそれを返す。無ければ原紙を読み取って生成する。原紙が
-        読み取れず OCR も使えない場合は、空フォームを返して手編集に委ねる。
+        原紙PDFに埋め込み定義があればそれを返す。無ければ原紙を読み取って生成する。
+        原紙が読み取れず OCR も使えない場合は、空フォームを返して手編集に委ねる。
         """
         # 原紙が電子データ出力PDF(テキスト層あり=スキャンでない)かを自動判定し、
         # 位置補正での原紙水平化スキップの初期値にする(原紙編集モードで上書き可)。
         is_vector = has_text_layer(genshi_path)
-        store = SurveyDocument.load(genshi_path, None)  # 原紙.json があれば読む
+        store = SurveyDocument.load(genshi_path, None)  # 埋め込み定義があれば読む
         if store.survey is not None:
             return store.survey  # 既存定義の reference_is_vector を尊重(上書きしない)
         survey = self._build_survey_from(genshi_path)
@@ -1322,7 +1367,8 @@ class MainWindowController(QObject):
         )
 
     def _finish_genshi_edit(self) -> None:
-        """原紙フォーム編集を確定: 原紙.json 保存→位置補正→記入済みPDFを電子化する。"""
+        """原紙フォーム編集を確定: 位置補正→記入済みPDFを電子化し、結果＋原紙基準画像を
+        記入済みPDFへ埋め込む(外部に原紙.json等は作らない)。"""
         info = self._genshi_edit
         if info is None:
             return
@@ -1330,8 +1376,8 @@ class MainWindowController(QObject):
         survey = self._survey
         genshi_path = info["genshi"]
         filled_path = info["filled"]
-        if survey is not None:
-            self._write_form_json(Path(genshi_path).with_suffix(".json"), survey)
+        # 原紙基準画像(差分検出・再電子化用)を、原紙PDFを閉じる前に取得しておく。
+        baseline_png = self._render_reference_baseline_png()
         self._genshi_edit = None
         self._set_digitize_mode(False)
         # 原紙編集表示を閉じてから、記入済みPDFを原紙基準で位置補正(上書き・.bak退避)。
@@ -1345,6 +1391,9 @@ class MainWindowController(QObject):
         if survey is not None and self.doc is not None:
             survey.detection.use_diff = True
             self._apply_survey_to_doc(survey)
+            if self._doc_store is not None:
+                # 原紙基準画像を埋め込み対象に。以後この記入済みPDFだけで再電子化できる。
+                self._doc_store.set_baseline(baseline_png)
         self._digitize_now()
 
     def _align_filled_to_reference(
@@ -1486,12 +1535,13 @@ class MainWindowController(QObject):
         dlg = SplitDialog(
             Path(self.doc.path), self._survey, len(self.doc), self.window,
             pages=self._doc_store.pages_dict(),
+            baseline_png=self._doc_store.baseline_png,
         )
         self._center_dialog(dlg)
         dlg.exec()
 
     def open_merge_dialog(self) -> None:
-        """チャンクのサイドカーJSONを集めて統合PDF＋JSONを書き出す。"""
+        """チャンク(PDF or 提出JSON)を集めて統合結果を埋め込んだ自己完結PDFを書き出す。"""
         start = str(Path(self.doc.path).parent) if self.doc is not None else None
         dlg = MergeDialog(self.window, start_dir=start)
         self._center_dialog(dlg)
@@ -1533,19 +1583,7 @@ class MainWindowController(QObject):
         dlg.raise_()
         dlg.activateWindow()
 
-    # --------------------------------------------------------- フォーム作成/保存/読込
-    @staticmethod
-    def _write_form_json(json_path: Path, survey: Survey) -> None:
-        """フォームのみ JSON(pages 空)を書き出す。"""
-        data = {
-            "source_pdf": survey.source_pdf,
-            "survey": survey_to_dict(survey),
-            "pages": {},
-        }
-        json_path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-        )
-
+    # --------------------------------------------------------- フォーム適用/編集
     def _apply_survey_to_doc(self, survey: Survey) -> None:
         """survey を現在の文書に適用する(校正結果 pages は保持)。
 
@@ -1574,6 +1612,7 @@ class MainWindowController(QObject):
         if self._page_index >= 0:
             self._load_page_into_form(self._page_index)  # 作成直後は検出せず空表示
         self._save_store()
+        self._update_genshi_status()
 
     def _build_survey_from(self, path: str) -> Survey | None:
         """指定PDFからフォーム定義を生成する。
@@ -1614,37 +1653,6 @@ class MainWindowController(QObject):
         dlg.show()
         dlg.raise_()
         dlg.activateWindow()
-
-    def save_form(self) -> None:
-        """現在アクティブなフォーム定義を、選択したパスへ form-only JSON で書き出す。"""
-        survey = self._survey
-        if survey is None:
-            QMessageBox.information(
-                self.window,
-                "フォーム保存",
-                "保存できるフォームがありません。\n"
-                "先にフォームを作成または読み込んでください。",
-            )
-            return
-        if survey.source_pdf:
-            default_name = Path(survey.source_pdf).with_suffix(".json").name
-        else:
-            default_name = f"{survey.survey_id}.json"
-        path, _ = QFileDialog.getSaveFileName(
-            self.window,
-            "フォーム保存",
-            str(Path.cwd() / default_name),
-            "Form JSON (*.json)",
-        )
-        if not path:
-            return
-        if not path.lower().endswith(".json"):
-            path += ".json"
-        self._write_form_json(Path(path), survey)
-        statusbar = self.window.statusBar()
-        if statusbar is not None:
-            statusbar.showMessage(f"フォームを保存しました: {Path(path).name}", 5000)
-
 
     def _on_detection_params_changed(self) -> None:
         """パラメータ変更 → 現在ページを再検出してフォーム・オーバーレイを更新。"""
@@ -1771,10 +1779,97 @@ class MainWindowController(QObject):
             )
 
     def _save_store(self) -> None:
-        """サイドカー JSON を書き出す(存在する場合)。保留中のオートセーブも消化。"""
+        """結果を作業 PDF へ埋め込み保存する(存在する場合)。保留中のオートセーブも消化。"""
         self._autosave_timer.stop()
         if self._doc_store is not None:
             self._doc_store.save()
+
+    def _ensure_original_backup(self, path: str) -> None:
+        """電子化前の生スキャン原本を初回オープン時に <stem>.bak.pdf へ退避する。
+
+        既に結果が埋め込まれた PDF(配布されたもの等)は退避しない＝`.bak` は「まだ電子化
+        していない生の原本」だけを保持する。`.bak.pdf` が既にあれば何もしない。
+        """
+        src = Path(path)
+        bak = src.with_name(f"{src.stem}.bak.pdf")
+        if not src.exists() or bak.exists():
+            return
+        if pdf_embed.has_embedded_data(src):
+            return  # 埋め込み済み(処理後)のファイルは退避しない
+        try:
+            shutil.copy2(src, bak)
+        except OSError:
+            pass  # 退避に失敗しても読み込みは続行
+
+    # ----------------------------------------------- 提出用JSONの書き出し
+    def _all_pages_reviewed(self) -> bool:
+        """全ページが確認済み(✓)か。1ページ以上あり、すべて reviewed のとき True。"""
+        if self.doc is None or self._doc_store is None or self._survey is None:
+            return False
+        total = len(self.doc)
+        return total > 0 and all(
+            self._doc_store.is_reviewed(i) for i in range(total)
+        )
+
+    def _update_submit_btn(self) -> None:
+        """提出ボタンの有効/無効を、全ページ確認済みかで更新する。"""
+        if self._submit_btn is not None:
+            self._submit_btn.setEnabled(self._all_pages_reviewed())
+
+    def _update_genshi_status(self) -> None:
+        """原紙(フォーム定義／差分基準)の読込状態をステータスバーに常時表示する。"""
+        sb = self.window.statusBar()
+        if sb is None:
+            return
+        if self._genshi_status_label is None:
+            self._genshi_status_label = QLabel()
+            sb.addPermanentWidget(self._genshi_status_label)
+        loaded = self._survey is not None
+        has_base = (
+            self._doc_store is not None and self._doc_store.baseline_png is not None
+        )
+        if loaded:
+            self._genshi_status_label.setText(
+                "原紙: 読込済み" + ("（差分・再電子化可）" if has_base else "")
+            )
+            self._genshi_status_label.setStyleSheet("color:#1a7f37; padding:0 8px;")
+        else:
+            self._genshi_status_label.setText("原紙: 未指定")
+            self._genshi_status_label.setStyleSheet("color:#888; padding:0 8px;")
+
+    def export_submission_json(self) -> None:
+        """読み取り結果を提出用 JSON として作業PDFと同じフォルダへ書き出す。
+
+        全ページ確認済みのときだけ実行できる(ボタンはそれ以外では無効)。内容は
+        {source_pdf, survey, pages} で、こちら側の「アンケートをマージ」と互換。
+        書き出した JSON は再オープン時には読み込まれない(読込は常に埋め込み優先)。
+        """
+        if (
+            self.doc is None
+            or self._doc_store is None
+            or self._survey is None
+            or not self._all_pages_reviewed()
+        ):
+            return
+        self._capture_current_page()
+        self._save_store()  # 念のため最新を埋め込みへ確定してから書き出す
+        out = Path(self.doc.path).with_suffix(".json")
+        data = {
+            "source_pdf": Path(self.doc.path).name,
+            "survey": survey_to_dict(self._survey),
+            "pages": self._doc_store.pages_dict(),
+        }
+        try:
+            out.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+        except OSError as e:
+            QMessageBox.warning(self.window, "提出用に書き出す", f"書き出しに失敗しました:\n{e}")
+            return
+        QMessageBox.information(
+            self.window, "提出用に書き出す",
+            f"提出用 JSON を書き出しました:\n{out}\n\nこの JSON を担当の方へ返送してください。",
+        )
 
     def _update_title(self) -> None:
         """ウィンドウタイトルを設定する(全面オートセーブのため未保存印は無し)。"""
@@ -1821,8 +1916,33 @@ class MainWindowController(QObject):
         self._apply_reviewed(reviewed, sync_form=False)
 
     def _on_review_btn_toggled(self, reviewed: bool) -> None:
-        """アクションバーの確認済みボタン操作 → 記録・フォーム同期。"""
+        """アクションバーの確認済みボタン操作 → 記録・フォーム同期。
+
+        確認済みにした(reviewed=True)ときは、続けて未確認の次ページへ自動で進む
+        (校正を素早く回せるように)。解除時はそのページに留まる。
+        """
         self._apply_reviewed(reviewed, sync_form=True)
+        if reviewed:
+            self._goto_next_unreviewed()
+
+    def _goto_next_unreviewed(self) -> None:
+        """現在ページより後ろの最初の未確認ページへ移動する(無ければ前方へ回り込む)。
+
+        全ページ確認済みなら移動せず、その旨を知らせる。
+        """
+        if self.doc is None or self._doc_store is None:
+            return
+        total = len(self.doc)
+        cur = self._page_index
+        # 後ろ(cur+1..末尾) → 回り込み(先頭..cur) の順で最初の未確認を探す。
+        order = list(range(cur + 1, total)) + list(range(0, cur + 1))
+        for i in order:
+            if not self._doc_store.is_reviewed(i):
+                self.thumbnail_list.setCurrentRow(i)  # → show_page(i)
+                return
+        sb = self.window.statusBar()
+        if sb is not None:
+            sb.showMessage("全ページを確認済みにしました。", 4000)
 
     def _apply_reviewed(self, reviewed: bool, *, sync_form: bool) -> None:
         """確認済み状態を記録し、サムネイル印・即保存・両UIの同期を行う。
@@ -1883,13 +2003,14 @@ class MainWindowController(QObject):
         return True
 
     def _sync_review_btn(self, reviewed: bool) -> None:
-        """確認済みボタンのチェック状態・文言をシグナル無しで同期する。"""
-        if self._review_btn is None:
-            return
-        self._review_btn.blockSignals(True)
-        self._review_btn.setChecked(reviewed)
-        self._review_btn.blockSignals(False)
-        self._review_btn.setText("✓ 確認済み" if reviewed else "✓ 確認済みにする")
+        """確認済みボタンのチェック状態・文言を同期し、提出ボタンの有効状態も更新する。"""
+        if self._review_btn is not None:
+            self._review_btn.blockSignals(True)
+            self._review_btn.setChecked(reviewed)
+            self._review_btn.blockSignals(False)
+            self._review_btn.setText("✓ 確認済み" if reviewed else "✓ 確認済みにする")
+        # 確認状態の変化・ページ読み込みの度に、全ページ✓かで提出ボタンを更新。
+        self._update_submit_btn()
 
     # ------------------------------------------------------------------ actions
     def open_pdf(self) -> None:
@@ -1904,10 +2025,13 @@ class MainWindowController(QObject):
         self.load_pdf(path)
 
     def load_pdf(self, path: str) -> None:
-        """指定パスの PDF を開く(サイドカーがあれば復元)。"""
+        """指定パスの PDF を開く(埋め込み結果があれば復元)。"""
         # 直前の文書の現在ページを保存してから切り替える
         self._capture_current_page()
         self._save_store()
+        # 配布時点の原本を初回オープン時に退避(以後この PDF はその場上書きされる)。
+        # `.bak.pdf` が既にあれば触らない＝最初に開いた状態を恒久保存し、いつでも戻せる。
+        self._ensure_original_backup(path)
 
         if self.doc is not None:
             self.doc.close()
@@ -1949,6 +2073,8 @@ class MainWindowController(QObject):
         self._base_title = f"アンケート読み込み支援 — {Path(path).name}"
         self._update_title()
         self._build_thumbnails()
+        self._update_submit_btn()  # 新しい文書に合わせて提出ボタンを再評価
+        self._update_genshi_status()
 
         if len(self.doc) > 0:
             self.thumbnail_list.setCurrentRow(0)

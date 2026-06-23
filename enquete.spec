@@ -37,6 +37,9 @@ def _collect(*packages):
 # PDF レンダリング/オーサリング(ネイティブ libpdfium を含む)
 _collect("pypdfium2", "pypdfium2_raw")
 
+# PDF への結果JSON・原紙基準画像の埋め込み/抽出(pikepdf=QPDF。ネイティブ libqpdf を含む)
+_collect("pikepdf", "lxml")
+
 if sys.platform == "darwin":
     # Apple Vision OCR(ocrmac は pyobjc 経由で Vision/Quartz/AppKit を使う)
     _collect("ocrmac", "Vision", "Quartz", "AppKit", "Foundation", "CoreFoundation", "objc")
@@ -143,8 +146,8 @@ else:
             info_plist={
                 "CFBundleName": "enquete",
                 "CFBundleDisplayName": "enquete",
-                "CFBundleShortVersionString": "0.1.7",
-                "CFBundleVersion": "0.1.7",
+                "CFBundleShortVersionString": "0.1.8",
+                "CFBundleVersion": "0.1.8",
                 "NSHighResolutionCapable": True,
                 "LSMinimumSystemVersion": "12.0",
             },

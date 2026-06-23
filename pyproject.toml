@@ -1,6 +1,6 @@
 [project]
 name = "enquete"
-version = "0.1.7"
+version = "0.1.8"
 description = "アンケート読み込み支援アプリ(3ペイン: サムネイル / PDF表示 / 入力結果)"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -9,6 +9,7 @@ dependencies = [
     "numpy>=2.4.6",
     "ocrmac>=1.0.1 ; sys_platform == 'darwin'",
     "opencv-python-headless>=4.13.0.92",
+    "pikepdf>=10",  # 結果JSON・原紙基準画像をPDFへ埋め込み/抽出(QPDF/MPL-2.0・再配布可)
     "pillow>=10",  # 傾き補正(deskew)等で使用。コア依存(macOS では ocrmac が間接導入)。
     "pypdfium2>=5.8.0",
     "PySide6>=6.8",
