@@ -2446,7 +2446,9 @@ class MainWindowController(QObject):
                 skipped += 1
                 continue
             image = self._render_image(index, DIGITIZE_RENDER_SCALE)
-            text = recognize_region(image, q.region, backend)
+            text = recognize_region(
+                image, q.region, backend, single_line=not q.multiline
+            )
             results = dict(self._doc_store.get_results(index) or {})
             results[question_id] = text
             self._doc_store.set_results(index, results)

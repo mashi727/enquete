@@ -16,14 +16,48 @@ from PySide6.QtGui import QImage
 
 from enquete.detect import detect_checkboxes, qimage_to_gray
 from enquete.formgen_ocr import _png_bytes
-from enquete.ocr.base import OcrBackend
+from enquete.ocr.base import OcrBackend, OcrLine
 from enquete.schema import FREE_TEXT, MULTI_CHOICE, SINGLE_CHOICE, Rect, Survey
 
 
+def _group_rows(lines: list[OcrLine]) -> list[list[OcrLine]]:
+    """OCR断片を「視覚的な行」へまとめる(縦の重なりで同一行と判定)。
+
+    OCR は大きな字間(メールの @ 前後など)で1行を複数断片に分けて返すことがある。
+    上端Yだけで並べると、同じ行でもベースラインの揺れで前後が入れ替わり改行されて
+    しまうため、縦方向の重なりが小さい方の高さの 50% を超える断片を同一行に束ねる。
+    """
+    rows: list[list[OcrLine]] = []
+    for ln in sorted(lines, key=lambda x: x.bbox[1]):  # 上→下
+        y0, y1 = ln.bbox[1], ln.bbox[3]
+        h = max(1e-6, y1 - y0)
+        placed = False
+        for row in rows:
+            ry0 = min(r.bbox[1] for r in row)
+            ry1 = max(r.bbox[3] for r in row)
+            overlap = min(y1, ry1) - max(y0, ry0)
+            if overlap > 0.5 * min(h, ry1 - ry0):
+                row.append(ln)
+                placed = True
+                break
+        if not placed:
+            rows.append([ln])
+    return rows
+
+
 def _ocr_region(
-    image: QImage, region: Rect, backend: OcrBackend, languages: Sequence[str]
+    image: QImage,
+    region: Rect,
+    backend: OcrBackend,
+    languages: Sequence[str],
+    single_line: bool = False,
 ) -> str:
-    """ページ画像の正規化矩形 region を切り出してOCRし、行を読み順に連結する。"""
+    """ページ画像の正規化矩形 region を切り出してOCRし、読み順に連結する。
+
+    OCR が返す断片を視覚的な行へまとめ、行内は左→右で連結、行間は改行で連結する。
+    single_line=True(単一行欄)なら、全断片を左→右で1行に連結する(メール欄など、
+    @ 前後の字間で2段に割れるのを防ぐ)。
+    """
     w, h = image.width(), image.height()
     x0, y0, x1, y1 = region
     rx, ry = max(0, int(x0 * w)), max(0, int(y0 * h))
@@ -32,9 +66,19 @@ def _ocr_region(
         return ""
     crop = image.copy(rx, ry, rw, rh)
     lines = backend.recognize_lines(_png_bytes(crop), languages)
-    # 読み順: 上→下、同程度の高さなら左→右
-    ordered = sorted(lines, key=lambda ln: (round(ln.bbox[1], 3), ln.bbox[0]))
-    return "\n".join(ln.text for ln in ordered).strip()
+    if not lines:
+        return ""
+    if single_line:
+        ordered = sorted(lines, key=lambda ln: ln.bbox[0])  # 左→右
+        return " ".join(ln.text.strip() for ln in ordered if ln.text.strip()).strip()
+    # 複数行: 行をまとめ、行内は左→右、行間は改行
+    out_rows: list[str] = []
+    for row in _group_rows(lines):
+        row_sorted = sorted(row, key=lambda ln: ln.bbox[0])
+        text = " ".join(ln.text.strip() for ln in row_sorted if ln.text.strip())
+        if text:
+            out_rows.append(text)
+    return "\n".join(out_rows).strip()
 
 
 def recognize_region(
@@ -42,9 +86,10 @@ def recognize_region(
     region: Rect,
     backend: OcrBackend,
     languages: Sequence[str] = ("ja-JP",),
+    single_line: bool = False,
 ) -> str:
     """1領域だけをOCRしてテキストを返す(自由記述欄の再認識などに使用)。"""
-    return _ocr_region(image, region, backend, languages)
+    return _ocr_region(image, region, backend, languages, single_line=single_line)
 
 
 def digitize_page(
@@ -72,7 +117,10 @@ def digitize_page(
             out[q.id] = list(r.checked) if r is not None else []
         elif q.type == FREE_TEXT:
             if backend is not None and q.region is not None:
-                out[q.id] = _ocr_region(image, q.region, backend, languages)
+                out[q.id] = _ocr_region(
+                    image, q.region, backend, languages,
+                    single_line=not q.multiline,
+                )
             else:
                 out[q.id] = ""
     return out
