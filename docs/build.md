@@ -47,6 +47,24 @@ uv run pyinstaller enquete.spec --noconfirm
   （[`ocr_windows.md`](ocr_windows.md) 参照）。
 - **同梱しない**: PyMuPDF（AGPL）・`typer`・`locro.cli` は除外します。
 
+### 配布サイズの削減（プルーニング）
+
+本アプリは QtWidgets ベース（PDF は pypdfium2 で描画）のため、PySide6 が同梱する
+多くのモジュールを使いません。`enquete.spec` は収集後に以下を除去して配布物を
+小さくします（macOS / Windows / Linux 共通）。
+
+- **未使用 PySide6 モジュール**: QML / Quick・QtPdf・QtNetwork・QtOpenGL（バインディングだけで約 8MB）・
+  Multimedia・3D・Charts など。バインディング（`.abi3.so` / `.pyd`）と対応する
+  Qt 共有ライブラリ・プラグインの両方を落とします。
+- **Qt 翻訳**: `*_ja.qm` / `*_en.qm` のみ残し、他言語（約 6MB）を除去。
+- **シンボル strip**: macOS / Linux のバイナリはシンボルを strip。
+- 日本語入力（`platforminputcontexts`）・画像（`imageformats`）・プラットフォーム
+  プラグインなど、動作に必要なものは残します。
+
+> opencv（`cv2`）は ffmpeg 系ライブラリを必須リンクしており、動画機能を使わなくても
+> 取り除くと `import cv2` が失敗するため温存します（このアプリで最大の容量要因）。
+> さらに削るには opencv を使う処理（傾き補正・検出）の依存見直しが必要です。
+
 ## 配布時の注意（署名なし）
 
 CI 生成物は**コード署名・公証なし**です。
