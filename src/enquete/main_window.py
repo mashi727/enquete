@@ -75,6 +75,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from enquete._log import log
 from enquete.detect import QuestionResult, detect_checkboxes, qimage_to_gray
 from enquete.detection_settings_dialog import DetectionSettingsDialog
 from enquete.form_editor_dialog import FormEditorDialog
@@ -2741,12 +2742,31 @@ class MainWindowController(QObject):
         if self.doc is None or self._page_index < 0:
             return
         render_scale = max(RENDER_MIN_SCALE, min(render_scale, RENDER_MAX_SCALE))
-        # 傾き補正モードのプレビューは生画像＋アイテム回転、通常は補正を焼き込む
-        if self._skew_mode:
-            image = self.doc.render(self._page_index, scale=render_scale)
-        else:
-            image = self._render_image(self._page_index, render_scale)
-        pixmap = QPixmap.fromImage(image)
+        try:
+            # 傾き補正モードのプレビューは生画像＋アイテム回転、通常は補正を焼き込む
+            if self._skew_mode:
+                image = self.doc.render(self._page_index, scale=render_scale)
+            else:
+                image = self._render_image(self._page_index, render_scale)
+            pixmap = QPixmap.fromImage(image)
+        except Exception:
+            # ここで失敗すると本表示が「真っ白」になる。Qt スロット内例外は標準
+            # エラーに吐かれて GUI ビルドでは見えないため、明示的にログへ残す。
+            log.exception(
+                "本表示の描画に失敗 page=%s scale=%.3f", self._page_index, render_scale
+            )
+            return
+        if image.isNull() or pixmap.isNull():
+            log.error(
+                "本表示の画像が空 page=%s scale=%.3f image_null=%s pixmap_null=%s size=%sx%s",
+                self._page_index, render_scale, image.isNull(), pixmap.isNull(),
+                image.width(), image.height(),
+            )
+            return
+        log.debug(
+            "本表示 描画 page=%s scale=%.3f size=%sx%s",
+            self._page_index, render_scale, pixmap.width(), pixmap.height(),
+        )
         self._scene.clear()
         self._grid_items = []  # scene.clear で消えたので参照も破棄
         item = self._scene.addPixmap(pixmap)
