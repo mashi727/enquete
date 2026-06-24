@@ -131,9 +131,6 @@ class FormPane(QWidget):
         self._region_buttons: dict[str, QPushButton] = {}
         # 折り返し選択肢の行 -> 対応するチェック/ラジオボタン（行クリックでトグル）
         self._option_buttons: dict[QWidget, QAbstractButton] = {}
-        # 範囲確定時の再認識スコープ（確認済み以外すべて / このページのみ）
-        self._rescope_all_btn: QRadioButton | None = None
-
         self._build()
 
     # ------------------------------------------------------------------ build
@@ -151,22 +148,6 @@ class FormPane(QWidget):
         # 右ペイン(フォーム)にはチェックボックスを置かない。set_reviewed は
         # _reviewed_check が None でも no-op で安全に動作する。
         self._reviewed_check = None
-
-        # 自由記述があるときだけ、範囲確定時の再認識スコープを選ばせる
-        if any(q.type == FREE_TEXT for q in self._survey.questions):
-            lbl = QLabel("「範囲を確定」したときの再認識の対象:")
-            lbl.setWordWrap(True)
-            lbl.setStyleSheet("font-weight: bold;")
-            rb_all = QRadioButton()
-            rb_page = QRadioButton()
-            rb_all.setChecked(True)
-            grp = QButtonGroup(self)
-            grp.addButton(rb_all)
-            grp.addButton(rb_page)
-            self._rescope_all_btn = rb_all
-            root.addWidget(lbl)
-            root.addWidget(self._wrap_control(rb_all, "確認済み以外のすべてのページ"))
-            root.addWidget(self._wrap_control(rb_page, "このページのみ"))
 
         for q in self._survey.questions:
             root.addWidget(self._build_question(q))
@@ -465,13 +446,6 @@ class FormPane(QWidget):
             self._reviewed_check.setChecked(reviewed)
             self._reviewed_check.blockSignals(False)
 
-    def region_rescope_all(self) -> bool:
-        """範囲確定時の再認識スコープが「確認済み以外すべて」なら True。
-
-        ラジオ未生成（自由記述なし）の場合も True（=全件側）を既定とする。
-        """
-        return self._rescope_all_btn is None or self._rescope_all_btn.isChecked()
-
     def set_region_edit_enabled(self, enabled: bool) -> None:
         """自由記述の「範囲を編集」ボタンの有効/無効を一括で切り替える。
 
@@ -489,7 +463,7 @@ class FormPane(QWidget):
             active = qid == active_qid
             btn.blockSignals(True)
             btn.setChecked(active)
-            btn.setText("範囲を確定（以降を再認識）" if active else "範囲を編集")
+            btn.setText("範囲を確定（再認識）" if active else "範囲を編集")
             btn.blockSignals(False)
 
     def toggle_option(self, qid: str, value: str) -> None:

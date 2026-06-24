@@ -3,7 +3,7 @@
 ink_threshold / roi_inset / dark_level / render_scale をスピンボックスで
 調整し、変更のたびに valuesChanged を発火する(呼び出し側が即再検出)。
 ROIオーバーレイ表示のトグルも提供する。変更した検出パラメータは現在の
-フォーム定義(survey.detection)に反映され、サイドカー保存時に記録される。
+フォーム定義(survey.detection)に反映され、保存時に記入済みPDFへ埋め込まれる。
 """
 from __future__ import annotations
 
@@ -107,7 +107,7 @@ class DetectionSettingsDialog(QDialog):
 
         hint = QLabel(
             "チェック漏れ→閾値を下げる / 誤検出→上げる。\n"
-            "変更は即座に現在ページへ反映され、保存時にサイドカーへ記録されます。"
+            "変更は即座に現在ページへ反映され、保存時に記入済みPDFへ埋め込まれます。"
         )
         hint.setStyleSheet("color: #666; font-size: 11px;")
         hint.setWordWrap(True)

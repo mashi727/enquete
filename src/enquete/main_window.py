@@ -2497,7 +2497,7 @@ class MainWindowController(QObject):
         if sb is not None:
             sb.showMessage(
                 f"「{question_id}」の記入範囲を編集中：辺/角=サイズ変更, 内側=移動。"
-                "もう一度ボタンで確定すると、現在以降のページをこの欄だけ再認識します。",
+                "もう一度ボタンで確定すると、確認済み以外の全ページをこの欄だけ再認識します。",
                 0,
             )
 
@@ -2538,10 +2538,8 @@ class MainWindowController(QObject):
     def _rerecognize_field(self, question_id: str) -> None:
         """編集確定した自由記述欄を再OCRする。
 
-        対象はフォーム上のラジオ選択に従う:
-        - 「確認済み以外のすべてのページ」: 全ページ走査・確認済みは除外。
-        - 「このページのみ」: 現在ページだけ(確認済みでも対象)。
-        (a)選択肢や他欄には触れず、この設問の region だけを上書きする。
+        対象は確認済み以外の全ページ(確認済みページは保護のため除外)。選択肢や
+        他欄には触れず、この設問の region だけを上書きする。
         """
         q = self._find_question(question_id)
         if (
@@ -2563,13 +2561,9 @@ class MainWindowController(QObject):
             )
             return
         self._capture_current_page()
-        all_pages = self.form_pane is None or self.form_pane.region_rescope_all()
-        if all_pages:
-            indices = list(range(len(self.doc)))
-            skip_reviewed = True
-        else:
-            indices = [self._page_index] if self._page_index >= 0 else []
-            skip_reviewed = False
+        # 確認済み以外の全ページを対象にする(確認済みは保護)。
+        indices = list(range(len(self.doc)))
+        skip_reviewed = True
         if not indices:
             return
         progress = QProgressDialog(
@@ -2599,8 +2593,7 @@ class MainWindowController(QObject):
             self._load_page_into_form(self._page_index)
         sb = self.window.statusBar()
         if sb is not None:
-            scope = "全ページ" if all_pages else "このページ"
-            msg = f"「{q.label}」を {done} ページ再認識しました（{scope}）"
+            msg = f"「{q.label}」を {done} ページ再認識しました"
             if skipped:
                 msg += f"（確認済み {skipped} ページは除外）"
             sb.showMessage(msg, 6000)
@@ -2954,8 +2947,8 @@ class MainWindowController(QObject):
         """現在の文書の insert_at 位置にドロップPDFを挿入し、別名で保存して開く。
 
         保存先はダイアログで尋ねる(既定＝現在の文書のフォルダに、ドロップした
-        ファイル名)。元の文書は変更しない。サイドカーの校正結果は挿入位置以降を
-        挿入枚数ぶんずらして新ファイルのサイドカーへ書き出す。
+        ファイル名)。元の文書は変更しない。校正結果は挿入位置以降を挿入枚数ぶん
+        ずらして、新ファイル自身へ埋め込む。
         """
         if self.doc is None:
             return
@@ -2970,7 +2963,7 @@ class MainWindowController(QObject):
             out_str += ".pdf"
         out_path = Path(out_str)
         self._capture_current_page()
-        self._save_store()  # 現在の編集を元サイドカーへ確定(元文書は維持)
+        self._save_store()  # 現在の編集を元PDFへ埋め込み確定(元文書はそのまま維持)
 
         tmp = out_path.with_name(f"{out_path.stem}.insert_tmp.pdf")
         try:
@@ -2982,12 +2975,13 @@ class MainWindowController(QObject):
         if n <= 0:
             tmp.unlink(missing_ok=True)
             return
-        # 新ファイルのサイドカー: フォーム＋(挿入位置以降をシフトした)校正結果
-        if self._doc_store is not None and self._survey is not None:
-            newdoc = SurveyDocument(out_path, self._survey)
-            newdoc._pages = dict(self._doc_store._pages)
-            newdoc.shift_pages(insert_at, n)
-            newdoc.save()
+        # 埋め込みは PDF 本体を out_path へ置換した後に行う(write_data は対象PDFを
+        # 開いて上書きするため、実体が無い/置換前だと失敗・上書き消失する)。同一上書き
+        # 時は _doc_store を閉じるので、シフト対象の結果を置換前に確保しておく。
+        new_survey = self._survey
+        new_pages = (
+            dict(self._doc_store._pages) if self._doc_store is not None else None
+        )
         # 出力先が現在開いているファイルと同一なら、閉じてから置換する
         same = out_path.resolve() == cur.resolve()
         if same:
@@ -3003,6 +2997,13 @@ class MainWindowController(QObject):
             if same:
                 self.load_pdf(str(cur))
             return
+        # PDF 本体が out_path に入った後で、フォーム＋(挿入位置以降をシフトした)校正
+        # 結果を out_path 自身へ埋め込む。
+        if new_survey is not None and new_pages is not None:
+            newdoc = SurveyDocument(out_path, new_survey)
+            newdoc._pages = new_pages
+            newdoc.shift_pages(insert_at, n)
+            newdoc.save()
         self.load_pdf(str(out_path))
         if self.doc is not None and 0 <= insert_at < len(self.doc):
             self.thumbnail_list.setCurrentRow(insert_at)
