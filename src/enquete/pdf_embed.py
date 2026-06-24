@@ -91,5 +91,14 @@ def write_data(
         raise
     if backup and not bak.exists():
         shutil.copy2(src, bak)
-    os.replace(tmp, src)
+    try:
+        os.replace(tmp, src)
+    except OSError as exc:
+        # Windows では src が他で開かれている(ファイルロック)と置換に失敗する。
+        # 取り残された一時ファイルを掃除し、原因が分かるエラーにして上げる。
+        tmp.unlink(missing_ok=True)
+        raise OSError(
+            f"PDF への結果保存に失敗しました(置換不可: {src.name})。"
+            "対象ファイルが他のプログラムで開かれている可能性があります。"
+        ) from exc
     return src

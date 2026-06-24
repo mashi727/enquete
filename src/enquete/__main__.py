@@ -8,6 +8,7 @@ from pathlib import Path
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
+from enquete._log import setup_logging
 from enquete.main_window import DEFAULT_FORM_FONT_PT, MainWindowController, load_main_window
 
 # ウィンドウ/Dock/タスクバー用アイコン(.ui と同じ ui/ に同梱)
@@ -15,6 +16,8 @@ ICON_PATH = Path(__file__).resolve().parent / "ui" / "icon.png"
 
 
 def main() -> int:
+    # 最初に: 配布版(console=False)でも例外・Qt 警告をファイルに残せるようにする。
+    setup_logging()
     app = QApplication(sys.argv)
     # QSettings の保存先キー(macOS: ~/Library/Preferences/com.LeonOrchestra.enquete.plist)
     app.setOrganizationName("LeonOrchestra")
