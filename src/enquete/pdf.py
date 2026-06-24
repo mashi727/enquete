@@ -15,7 +15,13 @@ class PdfDocument:
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
-        self._doc = pdfium.PdfDocument(str(self.path))
+        # パス渡しだと pypdfium2 が OS ファイルを開いたまま保持するため、Windows では
+        # 保存時の os.replace(原本のロスレス上書き)がロックされて失敗し、本表示が
+        # 真っ白になる・`.embed_tmp.pdf` が残る、という不具合になる。これを避けるため
+        # バイト列のスナップショットから開いてファイルハンドルを保持しない。
+        # (バッファは文書の寿命中、参照を保つ必要がある)
+        self._data = self.path.read_bytes()
+        self._doc = pdfium.PdfDocument(self._data)
 
     def __len__(self) -> int:
         return len(self._doc)
@@ -60,3 +66,4 @@ class PdfDocument:
 
     def close(self) -> None:
         self._doc.close()
+        self._data = b""  # バッファ参照を解放(GC 可能にする)

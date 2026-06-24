@@ -1780,10 +1780,23 @@ class MainWindowController(QObject):
             )
 
     def _save_store(self) -> None:
-        """結果を作業 PDF へ埋め込み保存する(存在する場合)。保留中のオートセーブも消化。"""
+        """結果を作業 PDF へ埋め込み保存する(存在する場合)。保留中のオートセーブも消化。
+
+        保存に失敗しても例外を上げない。以前は show_page の途中(描画前)で保存が
+        例外を投げると _render_page に到達せず本表示が真っ白になっていた(Windows で
+        ファイルロックにより os.replace が失敗するケース)。失敗はログとステータスバーへ
+        通知し、描画・操作は継続させる。
+        """
         self._autosave_timer.stop()
-        if self._doc_store is not None:
+        if self._doc_store is None:
+            return
+        try:
             self._doc_store.save()
+        except Exception:
+            log.exception("結果の埋め込み保存に失敗")
+            sb = self.window.statusBar()
+            if sb is not None:
+                sb.showMessage("結果の保存に失敗しました(ファイルが開かれている可能性)", 8000)
 
     def _ensure_original_backup(self, path: str) -> None:
         """電子化前の生スキャン原本を初回オープン時に <stem>.bak.pdf へ退避する。
