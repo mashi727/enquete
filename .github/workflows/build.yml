@@ -2,11 +2,14 @@ name: Build binaries
 
 # 手動実行(workflow_dispatch)と、v* タグ push 時にビルド。
 # タグ push のときは生成物を GitHub Release に添付する。
+# 加えて検証用に claude/** 作業ブランチへの push でもビルド(動作確認後に削除可)。
 on:
   workflow_dispatch:
   push:
     tags:
       - "v*"
+    branches:
+      - "claude/**"
 
 permissions:
   contents: write  # タグ時に Release へ添付するため
