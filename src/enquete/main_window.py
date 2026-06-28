@@ -2829,8 +2829,12 @@ class MainWindowController(QObject):
         item = self._box_edit_item
         self._box_edit_item = None
         self._box_edit_target = None
-        if item is not None and item.scene() is self._scene:
-            self._scene.removeItem(item)
+        # シーン再構築等で C++ 側が破棄済みのことがあるので保護的に扱う。
+        try:
+            if item is not None and item.scene() is self._scene:
+                self._scene.removeItem(item)
+        except RuntimeError:
+            pass
 
     def _hover_highlight_box(self, view_pos) -> None:
         """□位置編集中、カーソル直下の編集対象□の認識範囲(box_expand込み)を強調する。"""
@@ -3417,6 +3421,9 @@ class MainWindowController(QObject):
                     hit = self._option_at(sp.x() / w, sp.y() / h)
                     if hit is not None:
                         self._start_box_edit(*hit)
+                        # 相互参照: フォーム編集の一覧でも同じ選択肢を選択表示する。
+                        if self._editor_dialog is not None:
+                            self._editor_dialog.select_target(*hit)
                 return True
 
         # PDF上のダブルクリックで、その位置の選択肢のチェックをトグル(校正用)

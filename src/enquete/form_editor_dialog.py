@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QPushButton,
     QTreeWidget,
@@ -91,8 +92,10 @@ class FormEditorDialog(QDialog):
             return b
 
         row1 = QHBoxLayout()
-        row1.addWidget(btn("設問を追加", self._add_question))
-        row1.addWidget(btn("選択肢を追加", self._add_option))
+        # 追加は1つに統合: 選択中が選択肢なら選択肢を、設問(または未選択)なら設問を追加。
+        add_btn = btn("追加", self._add_smart)
+        add_btn.setToolTip("選択肢を選んでいれば選択肢を、設問を選んでいれば設問を追加します")
+        row1.addWidget(add_btn)
         row1.addWidget(btn("削除", self._delete))
         row2 = QHBoxLayout()
         row2.addWidget(btn("↑", self._move_up))
@@ -263,8 +266,40 @@ class FormEditorDialog(QDialog):
             k += 1
         return f"e{k}"
 
-    def _add_question(self) -> None:
-        q = Question(id=self._new_qid(), label="新しい設問", type=SINGLE_CHOICE)
+    def _pick_type(self, title: str, choices: list[tuple[str, str]]) -> str | None:
+        """種別をドロップダウンで選ばせる(キャンセルなら None)。choices=[(表示名, 値)]。"""
+        names = [n for n, _t in choices]
+        name, ok = QInputDialog.getItem(
+            self, title, "種別を選んでください:", names, 0, False
+        )
+        if not ok:
+            return None
+        return dict((n, t) for n, t in choices)[name]
+
+    def _add_smart(self) -> None:
+        """「追加」: 種別をダイアログで選んでから、選択肢/設問を追加する。
+
+        選択中が選択肢なら選択肢を、設問(または未選択)なら設問を追加する。
+        """
+        if isinstance(self._selected(), Option):
+            mtype = self._pick_type("選択肢を追加", _M_TYPES)
+            if mtype is not None:
+                self._add_option(mtype)
+        else:
+            qtype = self._pick_type("設問を追加", _Q_TYPES)
+            if qtype is not None:
+                self._add_question(qtype)
+
+    def _add_question(self, qtype: str = SINGLE_CHOICE) -> None:
+        q = Question(id=self._new_qid(), label="新しい設問", type=qtype)
+        # 選択式は空だと選択肢を足せないので、最初の選択肢を1つ用意しておく。
+        if qtype != FREE_TEXT:
+            q.options.append(
+                Option(value="新しい選択肢", checkbox=(0.1, 0.1, 0.12, 0.111),
+                       marker_type=MARKER_BOX)
+            )
+        else:
+            q.region = (0.1, 0.5, 0.9, 0.6)  # 仮(位置編集で調整)
         ref = self._selected()
         idx = len(self._survey.questions)
         if isinstance(ref, Question):
@@ -276,7 +311,7 @@ class FormEditorDialog(QDialog):
         self._survey.questions.insert(idx, q)
         self._populate_keep(q)
 
-    def _add_option(self) -> None:
+    def _add_option(self, marker_type: str = MARKER_BOX) -> None:
         ref = self._selected()
         q = ref if isinstance(ref, Question) else (
             self._parent_question(ref) if isinstance(ref, Option) else None
@@ -288,11 +323,9 @@ class FormEditorDialog(QDialog):
             x0, y0, x1, y1 = q.options[-1].checkbox
             dy = (y1 - y0) or 0.012
             box = (x0, min(0.99, y0 + dy * 1.5), x1, min(1.0, y1 + dy * 1.5))
-            mtype = q.options[-1].marker_type
         else:
             box = (0.1, 0.1, 0.12, 0.111)
-            mtype = MARKER_BOX
-        o = Option(value="新しい選択肢", checkbox=box, marker_type=mtype)
+        o = Option(value="新しい選択肢", checkbox=box, marker_type=marker_type)
         q.options.append(o)
         self._populate_keep(o)
 
@@ -335,6 +368,28 @@ class FormEditorDialog(QDialog):
         self._populate()
         self._select_ref(ref)
         self._emit_changed()
+
+    def select_target(self, qid: str, value: str | None) -> None:
+        """主画面(PDFクリック)からの指定で、対応する設問/選択肢をツリー選択する。
+
+        相互参照のループを避けるため、ここでは targetSelected を再送しない。
+        """
+        target: object | None = None
+        for q in self._survey.questions:
+            if q.id != qid:
+                continue
+            if value is None:
+                target = q
+            else:
+                target = next((o for o in q.options if o.value == value), None)
+            break
+        if target is None:
+            return
+        self._populating = True  # targetSelected を抑止
+        try:
+            self._select_ref(target)
+        finally:
+            self._populating = False
 
     def _select_ref(self, ref: object) -> None:
         def walk(item: QTreeWidgetItem) -> bool:
