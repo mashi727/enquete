@@ -48,13 +48,23 @@ _ROLE = Qt.ItemDataRole.UserRole
 
 class FormEditorDialog(QDialog):
     applied = Signal(object)  # 編集後の Survey(ディープコピー)
+    changed = Signal()  # live モード: 構造/ラベル/種別を変更した(主画面を更新)
+    targetSelected = Signal(object)  # live モード: 選択中の Question/Option(位置編集対象)
 
-    def __init__(self, survey: Survey, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, survey: Survey, parent: QWidget | None = None, live: bool = False
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("フォーム編集")
         self.resize(560, 640)
-        self._survey = copy.deepcopy(survey)
+        # live=True は生 survey を直接編集(PDF側の位置編集と同じオブジェクトを共有)。
+        # 非 live はディープコピー上で編集し「適用」で反映する(従来挙動)。
+        self._live = live
+        self._survey = survey if live else copy.deepcopy(survey)
         self._loading = False
+        self._populating = False  # 再描画中の中間選択で targetSelected を出さない
+        # 編集ウィンドウは常に最前面に出す(PDFを操作中も隠れない)。
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
 
         self._tree = QTreeWidget()
         self._tree.setColumnCount(2)
@@ -98,9 +108,18 @@ class FormEditorDialog(QDialog):
         buttons.addButton(QDialogButtonBox.StandardButton.Close)
         apply_btn.clicked.connect(self._emit_applied)
         buttons.rejected.connect(self.close)
+        # live は変更が即時反映されるため「適用」は不要(混乱を避けて隠す)。
+        if self._live:
+            apply_btn.setVisible(False)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("設問・選択肢を編集して「適用」してください。"))
+        intro = (
+            "設問・選択肢を編集できます。項目を選ぶと、その位置（□・記入範囲）を"
+            "PDF上でドラッグして調整できます。"
+            if self._live
+            else "設問・選択肢を編集して「適用」してください。"
+        )
+        layout.addWidget(QLabel(intro))
         layout.addWidget(self._tree, 1)
         layout.addLayout(row1)
         layout.addLayout(row2)
@@ -141,6 +160,7 @@ class FormEditorDialog(QDialog):
             if q is not None:
                 prev_expanded[id(q)] = it.isExpanded()
         self._loading = True
+        self._populating = True
         self._tree.clear()
         for q in self._survey.questions:
             qi = QTreeWidgetItem([q.label, self._q_info(q)])
@@ -155,6 +175,7 @@ class FormEditorDialog(QDialog):
             # 既知の設問は前回の展開状態を維持、新規(初回含む)は展開で表示
             qi.setExpanded(prev_expanded.get(id(q), True))
         self._loading = False
+        self._populating = False
 
     @staticmethod
     def _q_info(q: Question) -> str:
@@ -195,6 +216,9 @@ class FormEditorDialog(QDialog):
             self._type_combo.setEnabled(False)
             self._layout_combo.setEnabled(False)
         self._loading = False
+        # live: 選んだ項目を位置編集の対象として主画面へ伝える(再描画中の中間選択は除く)。
+        if self._live and not self._populating:
+            self.targetSelected.emit(ref)
 
     # -------------------------------------------------------------- editing
     def _on_item_changed(self, item: QTreeWidgetItem, col: int) -> None:
@@ -206,6 +230,7 @@ class FormEditorDialog(QDialog):
             ref.label = text
         elif isinstance(ref, Option):
             ref.value = text
+        self._emit_changed()
 
     def _on_type_changed(self, idx: int) -> None:
         if self._loading:
@@ -280,6 +305,7 @@ class FormEditorDialog(QDialog):
             if q is not None:
                 q.options.remove(ref)
         self._populate()
+        self._emit_changed()
 
     def _move(self, delta: int) -> None:
         ref = self._selected()
@@ -308,6 +334,7 @@ class FormEditorDialog(QDialog):
         """再描画し、ref に対応する項目を再選択する。"""
         self._populate()
         self._select_ref(ref)
+        self._emit_changed()
 
     def _select_ref(self, ref: object) -> None:
         def walk(item: QTreeWidgetItem) -> bool:
@@ -324,6 +351,11 @@ class FormEditorDialog(QDialog):
                 return
 
     # ---------------------------------------------------------------- apply
+    def _emit_changed(self) -> None:
+        """live モードのみ: 構造/ラベル変更を主画面へ通知する。"""
+        if self._live:
+            self.changed.emit()
+
     def _emit_applied(self) -> None:
         self.applied.emit(copy.deepcopy(self._survey))
 

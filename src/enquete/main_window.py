@@ -101,6 +101,8 @@ from enquete.schema import (
     MULTI_CHOICE,
     SINGLE_CHOICE,
     CheckboxDetection,
+    Option,
+    Question,
     Rect,
     Survey,
     survey_to_dict,
@@ -305,7 +307,7 @@ class MainWindowController(QObject):
         self._box_edit_btn: QToolButton | None = None
         self._box_edit_mode = False
         self._box_edit_item: RegionEditItem | None = None
-        self._box_edit_target: tuple[str, str] | None = None  # (qid, value)
+        self._box_edit_target: tuple[str, str | None] | None = None  # (qid, value|None)
         # フォームのフォントサイズ(pt)。既定14。表示メニューで変更・永続化。
         self._form_font_pt = DEFAULT_FORM_FONT_PT
         # OCRバックエンドの選好(auto/ocrmac/screenai)。ツールメニューで選択・永続化。
@@ -1779,7 +1781,11 @@ class MainWindowController(QObject):
             return None
 
     def open_form_editor(self) -> None:
-        """構造エディタでフォーム定義(設問・選択肢)を編集する(非モーダル)。"""
+        """構造エディタでフォーム定義(設問・選択肢)を編集する(非モーダル)。
+
+        原紙編集モード(genshi)では生 survey を直接編集する live モードで開き、項目を
+        選ぶと PDF 上で位置(□/記入範囲)も同時に調整できる(常に最前面)。
+        """
         if self._survey is None:
             QMessageBox.information(
                 self.window,
@@ -1788,13 +1794,73 @@ class MainWindowController(QObject):
                 "先にPDFを開いてフォームを作成または読み込んでください。",
             )
             return
-        dlg = FormEditorDialog(self._survey, self.window)
-        dlg.applied.connect(self._apply_survey_to_doc)
+        live = self._genshi_edit is not None
+        dlg = FormEditorDialog(self._survey, self.window, live=live)
+        if live:
+            dlg.changed.connect(self._on_editor_changed)
+            dlg.targetSelected.connect(self._on_editor_target)
+            dlg.finished.connect(self._on_editor_closed)
+            # 構造編集と位置編集を一緒に: エディタを開くと□位置編集モードもONにする。
+            if self._box_edit_btn is not None:
+                self._box_edit_btn.setChecked(True)
+        else:
+            dlg.applied.connect(self._apply_survey_to_doc)
         self._editor_dialog = dlg  # 寿命保持
         self._center_dialog(dlg)
         dlg.show()
         dlg.raise_()
         dlg.activateWindow()
+
+    def _on_editor_closed(self, *_: object) -> None:
+        """フォーム編集ウィンドウを閉じたら、併用していた□位置編集モードも畳む。"""
+        if self._box_edit_btn is not None and self._box_edit_btn.isChecked():
+            self._box_edit_btn.setChecked(False)
+        self._editor_dialog = None
+
+    def _on_editor_changed(self) -> None:
+        """エディタの構造/ラベル変更を主画面へ反映(右ペイン再構築＋オーバーレイ更新)。"""
+        if self._survey is None:
+            return
+        self._install_form_pane(self._survey)
+        self._refresh_overlay()
+
+    def _on_editor_target(self, ref: object) -> None:
+        """エディタで選択中の項目を位置編集の対象にし、何を調整中かステータス表示する。"""
+        if self._survey is None or self.doc is None:
+            return
+        self._refresh_overlay()  # 新規追加直後でも対象□/範囲を確実に表示
+        msg = ""
+        if isinstance(ref, Option):
+            q = self._qid_for_option(ref)
+            if q is None:
+                return
+            self._start_box_edit(q.id, ref.value)
+            msg = (
+                f"「{q.label}」の選択肢「{ref.value}」の □位置 を調整中"
+                "：PDF上の緑枠をドラッグ（辺・角＝大きさ）"
+            )
+        elif isinstance(ref, Question):
+            if ref.type == FREE_TEXT:
+                self._start_box_edit(ref.id, None)
+                msg = f"「{ref.label}」（自由記述）の 記入範囲 を調整中：PDF上の緑枠をドラッグ"
+            else:
+                self._finish_box_edit()
+                msg = f"「{ref.label}」を選択中：選択肢を選ぶと □位置 を調整できます"
+        else:
+            self._finish_box_edit()
+            return
+        sb = self.window.statusBar()
+        if sb is not None:
+            sb.showMessage(msg, 0)
+
+    def _qid_for_option(self, opt: object) -> Question | None:
+        """その選択肢オブジェクトを含む設問を(同一性で)返す。"""
+        if self._survey is None:
+            return None
+        for q in self._survey.questions:
+            if any(o is opt for o in q.options):
+                return q
+        return None
 
     def _on_detection_params_changed(self) -> None:
         """パラメータ変更 → 現在ページを再検出してフォーム・オーバーレイを更新。"""
@@ -2707,25 +2773,32 @@ class MainWindowController(QObject):
                 0,
             )
 
-    def _start_box_edit(self, question_id: str, value: str) -> None:
-        """指定オプションの□チェックROIをハンドル付き矩形で編集開始する。"""
+    def _start_box_edit(self, question_id: str, value: str | None) -> None:
+        """位置ROIをハンドル付き矩形で編集開始する。
+
+        value=選択肢名なら、その□チェックの checkbox を編集する。value=None なら
+        その設問(自由記述)の記入範囲 region を編集する。
+        """
         if self.doc is None or self._survey is None:
             return
-        opt = None
-        for q in self._survey.questions:
-            if q.id == question_id:
-                for o in q.options:
-                    if o.value == value:
-                        opt = o
-                break
-        if opt is None:
+        q = self._find_question(question_id)
+        if q is None:
             return
+        if value is None:
+            if q.region is None:
+                q.region = (0.1, 0.45, 0.9, 0.6)  # 仮(ドラッグで調整)
+            roi = q.region
+        else:
+            opt = next((o for o in q.options if o.value == value), None)
+            if opt is None:
+                return
+            roi = opt.checkbox
         self._finish_box_edit()
         sr = self._scene.sceneRect()
         w, h = sr.width(), sr.height()
         if w <= 0 or h <= 0:
             return
-        x0, y0, x1, y1 = opt.checkbox
+        x0, y0, x1, y1 = roi
         box = QRectF(x0 * w, y0 * h, (x1 - x0) * w, (y1 - y0) * h)
         item = RegionEditItem(box, self._handle_scene_size())
         item.changed.connect(
@@ -2735,8 +2808,8 @@ class MainWindowController(QObject):
         self._box_edit_item = item
         self._box_edit_target = (question_id, value)
 
-    def _on_box_edited(self, question_id: str, value: str) -> None:
-        """ハンドル編集の確定値を正規化して該当オプションの checkbox に保存する。"""
+    def _on_box_edited(self, question_id: str, value: str | None) -> None:
+        """ハンドル編集の確定値を正規化し、□checkbox(option)/region(自由記述)へ保存。"""
         if self._box_edit_item is None or self._survey is None:
             return
         sr = self._scene.sceneRect()
@@ -2750,12 +2823,14 @@ class MainWindowController(QObject):
             min(1.0, r.right() / w),
             min(1.0, r.bottom() / h),
         )
-        for q in self._survey.questions:
-            if q.id == question_id:
-                for o in q.options:
-                    if o.value == value:
-                        o.checkbox = rect
-                break
+        q = self._find_question(question_id)
+        if q is not None:
+            if value is None:
+                q.region = rect
+            else:
+                opt = next((o for o in q.options if o.value == value), None)
+                if opt is not None:
+                    opt.checkbox = rect
         # 原紙編集中は _doc_store=None(確定時に survey ごと埋め込む)。通常文書なら即保存。
         if self._doc_store is not None:
             self._doc_store.survey = self._survey
