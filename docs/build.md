@@ -13,9 +13,9 @@ GitHub Actions（[`.github/workflows/build.yml`](../.github/workflows/build.yml)
 - **リリース**: `v*` タグを push すると同じ生成物が **GitHub Release に添付**されます。
 
 ```bash
-git tag v0.1.16
-git push origin v0.1.16   # → Actions が走り、Release に成果物が付く
-# あるいは: gh release create v0.1.16 --title "enquete v0.1.16" --notes "..."
+git tag v0.1.17
+git push origin v0.1.17   # → Actions が走り、Release に成果物が付く
+# あるいは: gh release create v0.1.17 --title "enquete v0.1.17" --notes "..."
 ```
 
 ## ローカルビルド
