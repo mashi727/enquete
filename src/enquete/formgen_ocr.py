@@ -55,7 +55,7 @@ _BOX_RE = re.compile(_BOX)
 _GROUP = re.compile(r"【(.+?)】")
 # 見出し: 行頭の素の番号(括弧なし) + テキスト
 _HEADER = re.compile(r"^([0-9０-９]{1,2})[\s．.、]*([^\s0-9０-９].*)$")
-_SUBHEADER = re.compile(r"^[○〇]\s*(.+?)\s*[：:]\s*(.*)$")
+_SUBHEADER = re.compile(r"^[○〇●•・◦∙·]\s*(.+?)\s*[：:]\s*(.*)$")
 # 自由記述の小見出し: （ご感想等）のような短い丸括弧プロンプト(指示文は除外)
 _FREETEXT = re.compile(r"^[（(](.{1,14})[）)]$")
 _INSTRUCTION = re.compile(r"ください|下さい|記入|複数|印を|お付け|どなた")
@@ -191,7 +191,32 @@ def _parse_line(line: OcrLine) -> list[_Item]:
 
     sm = _SUBHEADER.match(text)
     if sm:
-        return [_Item("header", _clean(sm.group(1)), line.bbox, multi="複数" in text)]
+        label = _clean(sm.group(1))
+        rest = sm.group(2)
+        # コロン以降にインライン□選択肢があれば分解する(年齢/性別/お住まい/来場回数等、
+        # 「〇ラベル：□A □B …」の密着レイアウト)。密着のため全□で区切る。
+        if rest and _BOX_RE.search(rest):
+            offset = len(text) - len(rest)
+            marks = list(_BOX_RE.finditer(rest))
+            # 見出しはラベル部(最初の□より左)に置く。行全体だと中心が右に寄り、読み順で
+            # 自分の選択肢の中間に入って前半が別設問へ流れるため。
+            head_box = _interp_box(
+                line.bbox, 0, max(1, offset + marks[0].start()), len(text)
+            )
+            items = [_Item("header", label, head_box, multi="複数" in text)]
+            for i, m in enumerate(marks):
+                start = m.end()
+                end = marks[i + 1].start() if i + 1 < len(marks) else len(rest)
+                lbl = _clean(rest[start:end])
+                if not lbl:
+                    continue
+                pos = offset + m.start()
+                # 密着行は行内の文字位置で按分(box_for_range のYゆれで行が割れるのを防ぐ)
+                roi = _interp_box(line.bbox, pos, m.end() - m.start(), len(text))
+                items.append(_Item("option", lbl, roi, marker_type=MARKER_BOX))
+            if len(items) > 1:
+                return items
+        return [_Item("header", label, line.bbox, multi="複数" in text)]
 
     hm = _HEADER.match(text)
     if hm:
