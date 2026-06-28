@@ -1111,6 +1111,10 @@ class MainWindowController(QObject):
         act_digitize = QAction("アンケートを電子化（一括）…", self.window)
         act_digitize.triggered.connect(self.run_digitize_all)
         tools.addAction(act_digitize)
+        # 電子化済みPDFで原紙フォーム(チェック□位置・構造)を再編集する。
+        act_reedit = QAction("原紙フォームを編集（チェック位置の修正）…", self.window)
+        act_reedit.triggered.connect(self.reedit_genshi_form)
+        tools.addAction(act_reedit)
         tools.addSeparator()
         act_split = QAction("アンケートを分割…", self.window)
         act_split.triggered.connect(self.open_split_dialog)
@@ -1330,13 +1334,86 @@ class MainWindowController(QObject):
             source_pdf=Path(genshi_path).name,
         )
 
+    def _baseline_to_temp_pdf(self, png: bytes) -> Path | None:
+        """埋め込みの原紙基準画像(PNG)から、表示用の1ページPDFを一時ファイルに作る。
+
+        ページの点サイズは描画倍率(DIGITIZE_RENDER_SCALE)から逆算し、原紙の縦横比を
+        保つ(正規化された□座標がそのまま対応する)。失敗時は None。
+        """
+        import io
+        import tempfile
+
+        import pypdfium2 as pdfium
+        from PIL import Image
+
+        try:
+            pil = Image.open(io.BytesIO(png)).convert("RGB")
+            w_pt = pil.width / DIGITIZE_RENDER_SCALE
+            h_pt = pil.height / DIGITIZE_RENDER_SCALE
+            doc = pdfium.PdfDocument.new()
+            page = doc.new_page(w_pt, h_pt)
+            img = pdfium.PdfImage.new(doc)
+            img.set_bitmap(pdfium.PdfBitmap.from_pil(pil))
+            img.set_matrix(pdfium.PdfMatrix(w_pt, 0, 0, h_pt, 0, 0))
+            page.insert_obj(img)
+            page.gen_content()
+            page.close()
+            buf = io.BytesIO()
+            doc.save(buf)
+            doc.close()
+            fd, name = tempfile.mkstemp(suffix=".genshi.pdf")
+            os.close(fd)
+            p = Path(name)
+            p.write_bytes(buf.getvalue())
+            return p
+        except Exception:  # noqa: BLE001  展開失敗は None(呼び出し側がメッセージ)
+            return None
+
+    def reedit_genshi_form(self) -> None:
+        """電子化済みPDFで、埋め込み原紙を表示してフォーム(□位置・構造)を再編集する。
+
+        確定時は位置補正をやり直さず、編集後フォームで再検出のみ行う(確認済みは保護)。
+        """
+        if self._genshi_edit is not None:
+            return
+        if self.doc is None or self._survey is None or self._doc_store is None:
+            QMessageBox.information(
+                self.window, "原紙フォームを編集",
+                "先に「電子化」を済ませてから、フォームの再編集を行ってください。",
+            )
+            return
+        baseline = self._doc_store.baseline_png
+        if not baseline:
+            QMessageBox.information(
+                self.window, "原紙フォームを編集",
+                "この記入済みPDFには原紙の基準画像が埋め込まれていません。\n"
+                "一度「電子化」で原紙を指定し直してください。",
+            )
+            return
+        filled_path = str(self.doc.path)
+        self._capture_current_page()
+        self._save_store()  # 現在の校正を確定してから再編集に入る
+        temp = self._baseline_to_temp_pdf(baseline)
+        if temp is None:
+            QMessageBox.warning(
+                self.window, "原紙フォームを編集", "原紙画像の展開に失敗しました。"
+            )
+            return
+        self._enter_genshi_edit(
+            filled_path, str(temp), self._survey, realign=False, temp_genshi=temp
+        )
+
     def _enter_genshi_edit(
-        self, filled_path: str, genshi_path: str, survey: Survey
+        self, filled_path: str, genshi_path: str, survey: Survey,
+        realign: bool = True, temp_genshi: Path | None = None,
     ) -> None:
         """原紙PDFを表示し、構造編集＋自由記述の範囲指定を行う編集モードへ入る。
 
         確定は「✓ この原紙で電子化」(=③電子化ボタン)、取消は Esc。原紙には回答が
         無いためサイドカーは作らない(_doc_store=None)。差分基準は別インスタンスで保持。
+        realign=False は電子化済みPDFの再編集(チェック位置の修正等)で、確定時に
+        位置補正をやり直さず、編集後フォームで再検出のみ行う。temp_genshi は基準画像
+        から作った一時表示PDFで、終了時に削除する。
         """
         # 差分基準(原紙)を設定。表示用 self.doc とは別インスタンスにする。
         if self._reference_doc is not None:
@@ -1345,7 +1422,10 @@ class MainWindowController(QObject):
         self._reference_path = genshi_path
         self._clean_cache = None
         survey.detection.use_diff = True
-        self._genshi_edit = {"filled": filled_path, "genshi": genshi_path}
+        self._genshi_edit = {
+            "filled": filled_path, "genshi": genshi_path,
+            "realign": realign, "temp": str(temp_genshi) if temp_genshi else None,
+        }
 
         if self.doc is not None:
             self.doc.close()
@@ -1363,57 +1443,91 @@ class MainWindowController(QObject):
             self._settings_dialog = None
         self._install_form_pane(survey)
         self._set_digitize_mode(True)
+        # 再編集(realign=False)では確定ボタンの意味が「再検出」なので表示を変える。
+        if not realign and self._digitize_btn is not None:
+            self._digitize_btn.setText("✓ 修正を反映して再検出")
+            self._digitize_btn.setToolTip(
+                "編集したフォーム・□位置で全ページを再検出（位置補正はやり直さない）"
+            )
         # 「原紙は電子PDF」チェックを現在の判定値で初期化(toggleハンドラは抑止)。
         if self._vector_check is not None:
             self._vector_check.blockSignals(True)
             self._vector_check.setChecked(survey.detection.reference_is_vector)
             self._vector_check.blockSignals(False)
-        self._base_title = (
-            f"アンケート読み込み支援 — {Path(genshi_path).name}（原紙でフォーム編集）"
-        )
+        label = "原紙でフォーム編集" if realign else "原紙フォームを再編集"
+        self._base_title = f"アンケート読み込み支援 — {Path(genshi_path).name}（{label}）"
         self._update_title()
         self._build_thumbnails()
         if len(self.doc) > 0:
             self.thumbnail_list.setCurrentRow(0)
-        QMessageBox.information(
-            self.window, "原紙でフォームを編集",
-            "原紙を表示しました。フォームを確認・修正してください。\n\n"
-            "・設問／選択肢の構造: 「② フォーム ▾ → フォーム編集…」\n"
-            "・自由記述の記入範囲: 右ペインの各自由記述欄の「範囲指定」ボタンを押し、"
-            "原紙の上でドラッグして指定\n\n"
-            "編集が済んだら「✓ この原紙で電子化」を押すと、原紙フォームを保存して"
-            "記入済みPDFの読み取りを開始します（Esc で取消）。",
-        )
+        if realign:
+            QMessageBox.information(
+                self.window, "原紙でフォームを編集",
+                "原紙を表示しました。フォームを確認・修正してください。\n\n"
+                "・設問／選択肢の構造: 「設問・選択肢を編集…」\n"
+                "・チェック□の位置: 「□位置を編集」を ON にして原紙上の□をドラッグ\n"
+                "・自由記述の記入範囲: 右ペイン各欄の「範囲を編集」で原紙上をドラッグ\n\n"
+                "編集が済んだら「✓ この原紙で電子化」を押すと、原紙フォームを保存して"
+                "記入済みPDFの読み取りを開始します（Esc で取消）。",
+            )
+        else:
+            QMessageBox.information(
+                self.window, "原紙フォームを再編集",
+                "埋め込みの原紙を表示しました。チェック□の位置やフォーム構造を直せます。\n\n"
+                "・チェック□の位置: 「□位置を編集」を ON にして原紙上の□をドラッグ\n"
+                "・設問／選択肢の構造: 「設問・選択肢を編集…」\n\n"
+                "「✓ 修正を反映して再検出」で、編集後の□位置で全ページを再検出します"
+                "（位置補正はやり直さず、確認済みページは保護されます）。Esc で取消。",
+            )
 
     def _finish_genshi_edit(self) -> None:
-        """原紙フォーム編集を確定: 位置補正→記入済みPDFを電子化し、結果＋原紙基準画像を
-        記入済みPDFへ埋め込む(外部に原紙.json等は作らない)。"""
+        """原紙フォーム編集を確定。初回は位置補正→電子化、再編集は再検出のみ。"""
         info = self._genshi_edit
         if info is None:
             return
         self._finish_region_edit()
+        if self._box_edit_btn is not None and self._box_edit_btn.isChecked():
+            self._box_edit_btn.setChecked(False)  # □位置編集を畳む
         survey = self._survey
         genshi_path = info["genshi"]
         filled_path = info["filled"]
+        realign = info.get("realign", True)
+        temp = info.get("temp")
         # 原紙基準画像(差分検出・再電子化用)を、原紙PDFを閉じる前に取得しておく。
         baseline_png = self._render_reference_baseline_png()
         self._genshi_edit = None
         self._set_digitize_mode(False)
-        # 原紙編集表示を閉じてから、記入済みPDFを原紙基準で位置補正(上書き・.bak退避)。
+        # 原紙編集表示を閉じる。
         if self.doc is not None:
             self.doc.close()
             self.doc = None
-        level_ref = not (survey is not None and survey.detection.reference_is_vector)
-        self._align_filled_to_reference(filled_path, genshi_path, level_ref)
-        # 記入済み(補正後)を開き、原紙フォーム＋差分基準を適用してから電子化。
-        self.load_pdf(filled_path)
-        if survey is not None and self.doc is not None:
-            survey.detection.use_diff = True
-            self._apply_survey_to_doc(survey)
-            if self._doc_store is not None:
-                # 原紙基準画像を埋め込み対象に。以後この記入済みPDFだけで再電子化できる。
-                self._doc_store.set_baseline(baseline_png)
-        self._digitize_now()
+        if realign:
+            # 初回: 記入済みPDFを原紙基準で位置補正(上書き・.bak退避)→電子化。
+            level_ref = not (
+                survey is not None and survey.detection.reference_is_vector
+            )
+            self._align_filled_to_reference(filled_path, genshi_path, level_ref)
+            self.load_pdf(filled_path)
+            if survey is not None and self.doc is not None:
+                survey.detection.use_diff = True
+                self._apply_survey_to_doc(survey)
+                if self._doc_store is not None:
+                    # 以後この記入済みPDFだけで再電子化できるよう原紙基準画像を埋め込む。
+                    self._doc_store.set_baseline(baseline_png)
+            self._digitize_now()
+        else:
+            # 再編集: 位置補正・基準再生成はしない。編集後フォームを適用して再検出。
+            edited = survey  # 既存の□位置編集/構造編集を含む(load前に確保)
+            self.load_pdf(filled_path)  # 埋め込み結果・doc_store を復元
+            if edited is not None and self.doc is not None:
+                edited.detection.use_diff = True
+                self._apply_survey_to_doc(edited)  # 反映＋埋め込み保存(基準画像は維持)
+            if temp:
+                Path(temp).unlink(missing_ok=True)
+            self.reapply_detection()  # 補正済みページを編集後□位置で再検出(校正は保護)
+            return
+        if temp:
+            Path(temp).unlink(missing_ok=True)
 
     def _align_filled_to_reference(
         self, filled_path: str, genshi_path: str, level_reference: bool = True
@@ -1485,13 +1599,18 @@ class MainWindowController(QObject):
         if info is None:
             return
         self._finish_region_edit()
+        if self._box_edit_btn is not None and self._box_edit_btn.isChecked():
+            self._box_edit_btn.setChecked(False)
         filled_path = info["filled"]
+        temp = info.get("temp")
         self._genshi_edit = None
         self._set_digitize_mode(False)
         self.load_pdf(filled_path)
+        if temp:
+            Path(temp).unlink(missing_ok=True)
         sb = self.window.statusBar()
         if sb is not None:
-            sb.showMessage("原紙フォームの編集をキャンセルしました（電子化していません）。", 5000)
+            sb.showMessage("原紙フォームの編集をキャンセルしました（変更は反映していません）。", 5000)
 
     def _on_vector_check_toggled(self, checked: bool) -> None:
         """「原紙は電子PDF」チェックの操作 → 現在のフォーム定義へ反映。"""
@@ -2272,11 +2391,13 @@ class MainWindowController(QObject):
 
     # ---------------------------------------------------- ホバー連動ハイライト
     def _highlight_rect(
-        self, rect_norm: Rect | None, color: QColor, filled: bool = True
+        self, rect_norm: Rect | None, color: QColor, filled: bool = True,
+        ensure_visible: bool = True,
     ) -> None:
         """正規化矩形を PDF 上で強調表示する(直前の強調は消す)。
 
         filled=False のときは塗りなしの枠だけ(自由記述など、中の文字を隠さない)。
+        ensure_visible=False のときは画面内へのスクロールをしない(ホバー追従用)。
         """
         self._clear_highlight()
         sr = self._scene.sceneRect()
@@ -2301,11 +2422,12 @@ class MainWindowController(QObject):
             self._apply_overlay_skew(self._skew_preview_deg)
         # 拡大表示で枠が画面外なら最小限スクロールして見せる。これはフォーム操作
         # 起因のPDFスクロールなので、相互連動でフォームを巻き戻さないよう抑止する。
-        self._scroll_sync_guard = True
-        try:
-            self.pdf_view.ensureVisible(box, 40, 40)
-        finally:
-            self._scroll_sync_guard = False
+        if ensure_visible:
+            self._scroll_sync_guard = True
+            try:
+                self.pdf_view.ensureVisible(box, 40, 40)
+            finally:
+                self._scroll_sync_guard = False
 
     # ----------------------------------------------- PDFダブルクリックでトグル
     @staticmethod
@@ -2569,6 +2691,7 @@ class MainWindowController(QObject):
         self._box_edit_mode = bool(on)
         if not on:
             self._finish_box_edit()
+            self._clear_highlight()
             sb = self.window.statusBar()
             if sb is not None:
                 sb.clearMessage()
@@ -2646,6 +2769,32 @@ class MainWindowController(QObject):
         self._box_edit_target = None
         if item is not None and item.scene() is self._scene:
             self._scene.removeItem(item)
+
+    def _hover_highlight_box(self, view_pos) -> None:
+        """□位置編集中、カーソル直下の編集対象□の認識範囲(box_expand込み)を強調する。"""
+        if self._survey is None:
+            return
+        sr = self._scene.sceneRect()
+        w, h = sr.width(), sr.height()
+        if w <= 0 or h <= 0:
+            return
+        sp = self.pdf_view.mapToScene(view_pos)
+        hit = self._option_at(sp.x() / w, sp.y() / h)
+        if hit is None:
+            self._clear_highlight()
+            return
+        qid, value = hit
+        rect: Rect | None = None
+        for q in self._survey.questions:
+            if q.id == qid:
+                for o in q.options:
+                    if o.value == value:
+                        rect = self._option_marker_rect(o)  # 認識範囲(box_expand込み)
+                break
+        # ホバー追従なので画面スクロールはしない(ensure_visible=False)
+        self._highlight_rect(
+            rect, QColor(20, 110, 220), filled=True, ensure_visible=False
+        )
 
     def _rerecognize_field(self, question_id: str) -> None:
         """編集確定した自由記述欄を再OCRする。
@@ -3177,30 +3326,36 @@ class MainWindowController(QObject):
                 self._skew[self._page_index] = self._norm_angle(-deg)
                 return True
 
-        # □位置編集モード(原紙編集中): PDF上の□をクリックで選択 → ハンドル編集
+        # □位置編集モード(原紙編集中): カーソル追従で認識範囲を強調、クリックで選択
         if (
             self._box_edit_mode
             and self._survey is not None
             and watched is self.pdf_view.viewport()
             and isinstance(event, QMouseEvent)
-            and et == QEvent.Type.MouseButtonPress
-            and event.button() == Qt.MouseButton.LeftButton
         ):
-            sr = self._scene.sceneRect()
-            w, h = sr.width(), sr.height()
-            if w > 0 and h > 0:
-                sp = self.pdf_view.mapToScene(event.position().toPoint())
-                # 編集中の矩形(ハンドル含む)上の押下は、その矩形のドラッグに委ねる
-                if self._box_edit_item is not None:
-                    ir = self._box_edit_item.mapRectToScene(
-                        self._box_edit_item.boundingRect()
-                    )
-                    if ir.contains(sp):
-                        return False
-                hit = self._option_at(sp.x() / w, sp.y() / h)
-                if hit is not None:
-                    self._start_box_edit(*hit)
-            return True
+            # カーソル移動: 直下の編集対象□の認識範囲をハイライト(ドラッグ中は除く)
+            if et == QEvent.Type.MouseMove and self._box_edit_item is None:
+                self._hover_highlight_box(event.position().toPoint())
+                return False
+            if (
+                et == QEvent.Type.MouseButtonPress
+                and event.button() == Qt.MouseButton.LeftButton
+            ):
+                sr = self._scene.sceneRect()
+                w, h = sr.width(), sr.height()
+                if w > 0 and h > 0:
+                    sp = self.pdf_view.mapToScene(event.position().toPoint())
+                    # 編集中の矩形(ハンドル含む)上の押下は、その矩形のドラッグに委ねる
+                    if self._box_edit_item is not None:
+                        ir = self._box_edit_item.mapRectToScene(
+                            self._box_edit_item.boundingRect()
+                        )
+                        if ir.contains(sp):
+                            return False
+                    hit = self._option_at(sp.x() / w, sp.y() / h)
+                    if hit is not None:
+                        self._start_box_edit(*hit)
+                return True
 
         # PDF上のダブルクリックで、その位置の選択肢のチェックをトグル(校正用)
         if (
