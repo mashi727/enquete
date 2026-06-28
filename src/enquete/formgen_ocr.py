@@ -25,6 +25,7 @@ from enquete.ocr.base import OcrBackend, OcrLine
 from enquete.pdf import PdfDocument
 from enquete.schema import (
     FREE_TEXT,
+    MARKER_BOX,
     MARKER_CIRCLE_ITEM,
     MARKER_NUMBER,
     MULTI_CHOICE,
@@ -47,6 +48,10 @@ _PAREN = r"[（(][0-9０-９]{1,2}[）)]"
 _CIRCLED = r"[①-⑳]"
 _MARKER = re.compile(rf"{_PAREN}|{_CIRCLED}")
 _PAREN_RE = re.compile(_PAREN)
+# チェックボックス □。Vision OCR は □ を各選択肢の先頭グリフとして 口(漢字U+53E3)
+# やロ(カタカナU+30ED)に誤認することが多いので、それらも箱マーカーとして扱う。
+_BOX = r"[□☐▢◻◽⬜口ロ]"
+_BOX_RE = re.compile(_BOX)
 _GROUP = re.compile(r"【(.+?)】")
 # 見出し: 行頭の素の番号(括弧なし) + テキスト
 _HEADER = re.compile(r"^([0-9０-９]{1,2})[\s．.、]*([^\s0-9０-９].*)$")
@@ -115,6 +120,20 @@ def _png_bytes(qimage) -> bytes:
     return ba.data()
 
 
+def _box_marks(text: str) -> list[re.Match]:
+    """行内のチェックボックスマーカー(□/口/ロ)位置を返す。
+
+    先頭マーカーは無条件。それ以降は「直前が空白」のものだけ採用する
+    (ラベル内の 口/ロ ── 例「プロ」「口コミ」── を誤ってマーカー化しないため。
+    実データの選択肢区切りは「…公演 口いこーよ」のように箱の前に空白が入る)。
+    """
+    out: list[re.Match] = []
+    for i, m in enumerate(_BOX_RE.finditer(text)):
+        if i == 0 or (m.start() > 0 and text[m.start() - 1].isspace()):
+            out.append(m)
+    return out
+
+
 def _parse_line(line: OcrLine) -> list[_Item]:
     """1行を header / group / option(s) に分類して返す。"""
     text = line.text.strip()
@@ -122,7 +141,7 @@ def _parse_line(line: OcrLine) -> list[_Item]:
         return []
 
     gm = _GROUP.search(text)
-    if gm and not _MARKER.match(text):
+    if gm and not _MARKER.match(text) and not _BOX_RE.match(text):
         return [_Item("group", _clean(gm.group(1)), line.bbox)]
 
     # オプション行: 行頭がマーカー
@@ -142,6 +161,23 @@ def _parse_line(line: OcrLine) -> list[_Item]:
             mtype = MARKER_NUMBER if _PAREN_RE.fullmatch(m.group()) else MARKER_CIRCLE_ITEM
             items.append(_Item("option", label, roi, marker_type=mtype))
         return items
+
+    # オプション行(チェックボックス □): 行頭が □/口/ロ。Vision は □ をこれらに誤認する。
+    if _BOX_RE.match(text):
+        marks = _box_marks(text)
+        items = []
+        for i, m in enumerate(marks):
+            start = m.end()
+            end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
+            label = _clean(text[start:end])
+            if not label:
+                continue
+            roi = line.box_for_range(m.start(), m.end() - m.start())
+            if roi is None:
+                roi = _interp_box(line.bbox, m.start(), m.end() - m.start(), len(text))
+            items.append(_Item("option", label, roi, marker_type=MARKER_BOX))
+        if items:
+            return items
 
     # 自由記述プロンプト(見出し判定より前): 記入キーワード、または短い丸括弧。
     # 番号見出し由来なら番号を保持する。
@@ -237,7 +273,10 @@ def generate_survey_from_scans(
     render_scale: float = RENDER_SCALE,
     languages: Sequence[str] = ("ja-JP",),
 ) -> Survey:
-    """複数のスキャンPDFから number_mark 方式のフォームを生成する。"""
+    """複数のスキャンPDFからフォームを生成する。
+
+    選択肢マーカーは □(チェックボックス・Vision は 口/ロ と誤認)/（1）等の番号/
+    ①等の丸数字に対応する。"""
     # サンプリング対象ページ(全PDFのページを集めて均等抽出)
     page_refs: list[tuple[PdfDocument, int]] = []
     docs = [PdfDocument(p) for p in pdf_paths]

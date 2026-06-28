@@ -301,6 +301,11 @@ class MainWindowController(QObject):
         # 自由記述の記入領域編集(ハンドル付き矩形)の状態
         self._region_edit_item: RegionEditItem | None = None
         self._region_edit_qid: str | None = None
+        # 原紙編集モードの □ チェック位置編集サブモードの状態
+        self._box_edit_btn: QToolButton | None = None
+        self._box_edit_mode = False
+        self._box_edit_item: RegionEditItem | None = None
+        self._box_edit_target: tuple[str, str] | None = None  # (qid, value)
         # フォームのフォントサイズ(pt)。既定14。表示メニューで変更・永続化。
         self._form_font_pt = DEFAULT_FORM_FONT_PT
         # OCRバックエンドの選好(auto/ocrmac/screenai)。ツールメニューで選択・永続化。
@@ -649,6 +654,19 @@ class MainWindowController(QObject):
         )
         self._struct_btn.setVisible(False)
         h.addWidget(self._struct_btn)
+        # □チェック位置の編集トグル(原紙編集モード中のみ表示)。PDF上の□をクリックで
+        # 選択し、ハンドルでドラッグして位置・サイズを直す。
+        box_btn = QToolButton()
+        box_btn.setCheckable(True)
+        box_btn.setText("□位置を編集")
+        box_btn.setToolTip(
+            "原紙上の□をクリックで選択し、ドラッグで検出位置を修正します"
+            "（自動認識でズレた□を手で合わせる）"
+        )
+        box_btn.setVisible(False)
+        box_btn.toggled.connect(self._toggle_box_edit_mode)
+        self._box_edit_btn = box_btn
+        h.addWidget(box_btn)
         # 原紙=電子データ出力PDF(スキャンでない)か。位置補正で原紙の水平化を省く。
         self._vector_check = QCheckBox("原紙は電子PDF")
         self._vector_check.setToolTip(
@@ -1509,6 +1527,10 @@ class MainWindowController(QObject):
             self._struct_btn.setVisible(editing)
         if self._vector_check is not None:
             self._vector_check.setVisible(editing)
+        if self._box_edit_btn is not None:
+            self._box_edit_btn.setVisible(editing)
+            if not editing and self._box_edit_btn.isChecked():
+                self._box_edit_btn.setChecked(False)  # → _toggle_box_edit_mode(False)
         if self._digitize_btn is None:
             return
         if editing:
@@ -1979,8 +2001,13 @@ class MainWindowController(QObject):
         self._sync_review_btn(reviewed)
 
     def _on_escape(self) -> None:
-        """Esc の一元処理。傾き補正→原紙編集→確認済み編集の取消、の優先順。"""
-        if self._skew_mode:
+        """Esc の一元処理。□位置編集→傾き補正→原紙編集→確認済み編集の取消、の優先順。"""
+        if self._box_edit_mode:
+            if self._box_edit_btn is not None:
+                self._box_edit_btn.setChecked(False)  # → _toggle_box_edit_mode(False)
+            else:
+                self._toggle_box_edit_mode(False)
+        elif self._skew_mode:
             self._cancel_skew_mode()
         elif self._genshi_edit is not None:
             self._cancel_genshi_edit()
@@ -2535,6 +2562,91 @@ class MainWindowController(QObject):
             sb.clearMessage()
         self._refresh_overlay()
 
+    # ----------------------------------------- □チェック位置の編集(原紙編集モード)
+    def _toggle_box_edit_mode(self, on: bool) -> None:
+        """□位置編集サブモードの ON/OFF。ON 中は PDF 上の□をクリックで選択して
+        ハンドルで位置・サイズを直す。OFF で編集中の矩形を片付ける。"""
+        self._box_edit_mode = bool(on)
+        if not on:
+            self._finish_box_edit()
+            sb = self.window.statusBar()
+            if sb is not None:
+                sb.clearMessage()
+            return
+        # ボックスが見えるようオーバーレイを表示してから案内
+        self._overlay_enabled = True
+        self._refresh_overlay()
+        sb = self.window.statusBar()
+        if sb is not None:
+            sb.showMessage(
+                "□位置の編集中：PDF上の□をクリックで選択し、内側=移動 / 辺・角=サイズ変更。"
+                "別の□をクリックで切替、もう一度ボタンで終了。",
+                0,
+            )
+
+    def _start_box_edit(self, question_id: str, value: str) -> None:
+        """指定オプションの□チェックROIをハンドル付き矩形で編集開始する。"""
+        if self.doc is None or self._survey is None:
+            return
+        opt = None
+        for q in self._survey.questions:
+            if q.id == question_id:
+                for o in q.options:
+                    if o.value == value:
+                        opt = o
+                break
+        if opt is None:
+            return
+        self._finish_box_edit()
+        sr = self._scene.sceneRect()
+        w, h = sr.width(), sr.height()
+        if w <= 0 or h <= 0:
+            return
+        x0, y0, x1, y1 = opt.checkbox
+        box = QRectF(x0 * w, y0 * h, (x1 - x0) * w, (y1 - y0) * h)
+        item = RegionEditItem(box, self._handle_scene_size())
+        item.changed.connect(
+            lambda qid=question_id, val=value: self._on_box_edited(qid, val)
+        )
+        self._scene.addItem(item)
+        self._box_edit_item = item
+        self._box_edit_target = (question_id, value)
+
+    def _on_box_edited(self, question_id: str, value: str) -> None:
+        """ハンドル編集の確定値を正規化して該当オプションの checkbox に保存する。"""
+        if self._box_edit_item is None or self._survey is None:
+            return
+        sr = self._scene.sceneRect()
+        w, h = sr.width(), sr.height()
+        if w <= 0 or h <= 0:
+            return
+        r = self._box_edit_item.rect()
+        rect = (
+            max(0.0, r.left() / w),
+            max(0.0, r.top() / h),
+            min(1.0, r.right() / w),
+            min(1.0, r.bottom() / h),
+        )
+        for q in self._survey.questions:
+            if q.id == question_id:
+                for o in q.options:
+                    if o.value == value:
+                        o.checkbox = rect
+                break
+        # 原紙編集中は _doc_store=None(確定時に survey ごと埋め込む)。通常文書なら即保存。
+        if self._doc_store is not None:
+            self._doc_store.survey = self._survey
+            self._save_store()
+        self._refresh_overlay()  # 下敷きのROI枠も新位置へ追従(編集中の緑矩形は別管理で残る)
+
+    def _finish_box_edit(self) -> None:
+        """編集中の□矩形を取り除く(モード自体は維持)。"""
+        item = self._box_edit_item
+        self._box_edit_item = None
+        self._box_edit_target = None
+        if item is not None and item.scene() is self._scene:
+            self._scene.removeItem(item)
+
     def _rerecognize_field(self, question_id: str) -> None:
         """編集確定した自由記述欄を再OCRする。
 
@@ -3065,9 +3177,35 @@ class MainWindowController(QObject):
                 self._skew[self._page_index] = self._norm_angle(-deg)
                 return True
 
+        # □位置編集モード(原紙編集中): PDF上の□をクリックで選択 → ハンドル編集
+        if (
+            self._box_edit_mode
+            and self._survey is not None
+            and watched is self.pdf_view.viewport()
+            and isinstance(event, QMouseEvent)
+            and et == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            sr = self._scene.sceneRect()
+            w, h = sr.width(), sr.height()
+            if w > 0 and h > 0:
+                sp = self.pdf_view.mapToScene(event.position().toPoint())
+                # 編集中の矩形(ハンドル含む)上の押下は、その矩形のドラッグに委ねる
+                if self._box_edit_item is not None:
+                    ir = self._box_edit_item.mapRectToScene(
+                        self._box_edit_item.boundingRect()
+                    )
+                    if ir.contains(sp):
+                        return False
+                hit = self._option_at(sp.x() / w, sp.y() / h)
+                if hit is not None:
+                    self._start_box_edit(*hit)
+            return True
+
         # PDF上のダブルクリックで、その位置の選択肢のチェックをトグル(校正用)
         if (
             not self._skew_mode
+            and not self._box_edit_mode
             and self._survey is not None
             and self.form_pane is not None
             and watched is self.pdf_view.viewport()
