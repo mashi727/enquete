@@ -303,8 +303,7 @@ class MainWindowController(QObject):
         # 自由記述の記入領域編集(ハンドル付き矩形)の状態
         self._region_edit_item: RegionEditItem | None = None
         self._region_edit_qid: str | None = None
-        # 原紙編集モードの □ チェック位置編集サブモードの状態
-        self._box_edit_btn: QToolButton | None = None
+        # 原紙編集モードの □ チェック位置編集サブモードの状態(フォーム編集と一体運用)
         self._box_edit_mode = False
         self._box_edit_item: RegionEditItem | None = None
         self._box_edit_target: tuple[str, str | None] | None = None  # (qid, value|None)
@@ -648,27 +647,15 @@ class MainWindowController(QObject):
         self._model_btn = model_btn
         h.addWidget(model_btn)
         self._update_model_label()
-        # フォーム編集は「③電子化→原紙を指定」の原紙編集モードに集約。構造編集
-        # (設問・選択肢)ボタンはそのモード中だけ表示する。
+        # フォーム編集は「③電子化→原紙を指定」の原紙編集モードに集約。設問・選択肢の
+        # 構造編集と□/記入範囲の位置編集を1つのボタンに統合(モード中だけ表示)。開くと
+        # 一覧で項目を選んで PDF 上で位置をドラッグ調整できる(常に最前面)。
         self._struct_btn = btn(
-            "設問・選択肢を編集…", self.open_form_editor,
-            "原紙のフォーム構造（設問・選択肢・種別）を編集します",
+            "設問・選択肢／位置を編集…", self.open_form_editor,
+            "設問・選択肢を編集し、項目を選んで□や記入範囲の位置を PDF 上でドラッグ調整します",
         )
         self._struct_btn.setVisible(False)
         h.addWidget(self._struct_btn)
-        # □チェック位置の編集トグル(原紙編集モード中のみ表示)。PDF上の□をクリックで
-        # 選択し、ハンドルでドラッグして位置・サイズを直す。
-        box_btn = QToolButton()
-        box_btn.setCheckable(True)
-        box_btn.setText("□位置を編集")
-        box_btn.setToolTip(
-            "原紙上の□をクリックで選択し、ドラッグで検出位置を修正します"
-            "（自動認識でズレた□を手で合わせる）"
-        )
-        box_btn.setVisible(False)
-        box_btn.toggled.connect(self._toggle_box_edit_mode)
-        self._box_edit_btn = box_btn
-        h.addWidget(box_btn)
         # 原紙=電子データ出力PDF(スキャンでない)か。位置補正で原紙の水平化を省く。
         self._vector_check = QCheckBox("原紙は電子PDF")
         self._vector_check.setToolTip(
@@ -1488,8 +1475,9 @@ class MainWindowController(QObject):
         if info is None:
             return
         self._finish_region_edit()
-        if self._box_edit_btn is not None and self._box_edit_btn.isChecked():
-            self._box_edit_btn.setChecked(False)  # □位置編集を畳む
+        if self._editor_dialog is not None:
+            self._editor_dialog.close()  # フォーム編集ウィンドウ→ _on_editor_closed で位置編集OFF
+        self._toggle_box_edit_mode(False)
         survey = self._survey
         genshi_path = info["genshi"]
         filled_path = info["filled"]
@@ -1601,8 +1589,9 @@ class MainWindowController(QObject):
         if info is None:
             return
         self._finish_region_edit()
-        if self._box_edit_btn is not None and self._box_edit_btn.isChecked():
-            self._box_edit_btn.setChecked(False)
+        if self._editor_dialog is not None:
+            self._editor_dialog.close()
+        self._toggle_box_edit_mode(False)
         filled_path = info["filled"]
         temp = info.get("temp")
         self._genshi_edit = None
@@ -1648,10 +1637,11 @@ class MainWindowController(QObject):
             self._struct_btn.setVisible(editing)
         if self._vector_check is not None:
             self._vector_check.setVisible(editing)
-        if self._box_edit_btn is not None:
-            self._box_edit_btn.setVisible(editing)
-            if not editing and self._box_edit_btn.isChecked():
-                self._box_edit_btn.setChecked(False)  # → _toggle_box_edit_mode(False)
+        if not editing:
+            # 原紙編集モードを抜けるときは位置編集も畳む。
+            if self._editor_dialog is not None:
+                self._editor_dialog.close()
+            self._toggle_box_edit_mode(False)
         if self._digitize_btn is None:
             return
         if editing:
@@ -1800,9 +1790,8 @@ class MainWindowController(QObject):
             dlg.changed.connect(self._on_editor_changed)
             dlg.targetSelected.connect(self._on_editor_target)
             dlg.finished.connect(self._on_editor_closed)
-            # 構造編集と位置編集を一緒に: エディタを開くと□位置編集モードもONにする。
-            if self._box_edit_btn is not None:
-                self._box_edit_btn.setChecked(True)
+            # 構造編集と位置編集は一体: エディタを開くと□位置編集モードもONにする。
+            self._toggle_box_edit_mode(True)
         else:
             dlg.applied.connect(self._apply_survey_to_doc)
         self._editor_dialog = dlg  # 寿命保持
@@ -1812,10 +1801,9 @@ class MainWindowController(QObject):
         dlg.activateWindow()
 
     def _on_editor_closed(self, *_: object) -> None:
-        """フォーム編集ウィンドウを閉じたら、併用していた□位置編集モードも畳む。"""
-        if self._box_edit_btn is not None and self._box_edit_btn.isChecked():
-            self._box_edit_btn.setChecked(False)
+        """フォーム編集ウィンドウを閉じたら、一体運用の□位置編集モードも畳む。"""
         self._editor_dialog = None
+        self._toggle_box_edit_mode(False)
 
     def _on_editor_changed(self) -> None:
         """エディタの構造/ラベル変更を主画面へ反映(右ペイン再構築＋オーバーレイ更新)。"""
@@ -2186,12 +2174,11 @@ class MainWindowController(QObject):
         self._sync_review_btn(reviewed)
 
     def _on_escape(self) -> None:
-        """Esc の一元処理。□位置編集→傾き補正→原紙編集→確認済み編集の取消、の優先順。"""
-        if self._box_edit_mode:
-            if self._box_edit_btn is not None:
-                self._box_edit_btn.setChecked(False)  # → _toggle_box_edit_mode(False)
-            else:
-                self._toggle_box_edit_mode(False)
+        """Esc の一元処理。フォーム/位置編集→傾き補正→原紙編集→確認済み編集の取消、の順。"""
+        if self._editor_dialog is not None:
+            self._editor_dialog.close()  # → _on_editor_closed で位置編集も畳む
+        elif self._box_edit_mode:
+            self._toggle_box_edit_mode(False)
         elif self._skew_mode:
             self._cancel_skew_mode()
         elif self._genshi_edit is not None:
