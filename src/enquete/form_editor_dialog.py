@@ -14,9 +14,10 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFormLayout,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
+    QLineEdit,
     QPushButton,
     QTreeWidget,
     QTreeWidgetItem,
@@ -266,32 +267,51 @@ class FormEditorDialog(QDialog):
             k += 1
         return f"e{k}"
 
-    def _pick_type(self, title: str, choices: list[tuple[str, str]]) -> str | None:
-        """種別をドロップダウンで選ばせる(キャンセルなら None)。choices=[(表示名, 値)]。"""
-        names = [n for n, _t in choices]
-        name, ok = QInputDialog.getItem(
-            self, title, "種別を選んでください:", names, 0, False
+    def _ask_add(
+        self, title: str, choices: list[tuple[str, str]], default_name: str
+    ) -> tuple[str, str] | None:
+        """追加ダイアログ: 種別(ドロップダウン)と名称を入力させる。
+
+        choices=[(表示名, 値)]。戻り値 (選んだ値, 入力名) / キャンセルなら None。
+        """
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        form = QFormLayout(dlg)
+        combo = QComboBox()
+        for name, _t in choices:
+            combo.addItem(name)
+        name_edit = QLineEdit(default_name)
+        name_edit.selectAll()
+        form.addRow("種別:", combo)
+        form.addRow("名称:", name_edit)
+        bb = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        if not ok:
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        form.addRow(bb)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return None
-        return dict((n, t) for n, t in choices)[name]
+        typ = dict((n, t) for n, t in choices)[combo.currentText()]
+        return typ, (name_edit.text().strip() or default_name)
 
     def _add_smart(self) -> None:
-        """「追加」: 種別をダイアログで選んでから、選択肢/設問を追加する。
+        """「追加」: 種別と名称をダイアログで入力し、選択行の直後に追加する。
 
         選択中が選択肢なら選択肢を、設問(または未選択)なら設問を追加する。
         """
-        if isinstance(self._selected(), Option):
-            mtype = self._pick_type("選択肢を追加", _M_TYPES)
-            if mtype is not None:
-                self._add_option(mtype)
+        ref = self._selected()
+        if isinstance(ref, Option):
+            got = self._ask_add("選択肢を追加", _M_TYPES, "新しい選択肢")
+            if got is not None:
+                self._add_option(got[0], got[1], after=ref)
         else:
-            qtype = self._pick_type("設問を追加", _Q_TYPES)
-            if qtype is not None:
-                self._add_question(qtype)
+            got = self._ask_add("設問を追加", _Q_TYPES, "新しい設問")
+            if got is not None:
+                self._add_question(got[0], got[1])
 
-    def _add_question(self, qtype: str = SINGLE_CHOICE) -> None:
-        q = Question(id=self._new_qid(), label="新しい設問", type=qtype)
+    def _add_question(self, qtype: str = SINGLE_CHOICE, label: str = "新しい設問") -> None:
+        q = Question(id=self._new_qid(), label=label, type=qtype)
         # 選択式は空だと選択肢を足せないので、最初の選択肢を1つ用意しておく。
         if qtype != FREE_TEXT:
             q.options.append(
@@ -300,6 +320,7 @@ class FormEditorDialog(QDialog):
             )
         else:
             q.region = (0.1, 0.5, 0.9, 0.6)  # 仮(位置編集で調整)
+        # 挿入位置: 選択行(設問。選択肢選択時はその親設問)の直後。
         ref = self._selected()
         idx = len(self._survey.questions)
         if isinstance(ref, Question):
@@ -311,22 +332,34 @@ class FormEditorDialog(QDialog):
         self._survey.questions.insert(idx, q)
         self._populate_keep(q)
 
-    def _add_option(self, marker_type: str = MARKER_BOX) -> None:
-        ref = self._selected()
-        q = ref if isinstance(ref, Question) else (
-            self._parent_question(ref) if isinstance(ref, Option) else None
-        )
+    def _add_option(
+        self, marker_type: str = MARKER_BOX, value: str = "新しい選択肢",
+        after: Option | None = None,
+    ) -> None:
+        q = self._parent_question(after) if after is not None else None
+        if q is None:
+            ref = self._selected()
+            q = ref if isinstance(ref, Question) else (
+                self._parent_question(ref) if isinstance(ref, Option) else None
+            )
         if q is None or q.type == FREE_TEXT:
             return
-        # 既存末尾のROIを少し下にずらして仮配置(なければ既定)
-        if q.options:
-            x0, y0, x1, y1 = q.options[-1].checkbox
+        # ROI: 直後に置く基準(選択中の選択肢、無ければ末尾)の少し下に仮配置。
+        anchor = after if (after is not None and after in q.options) else (
+            q.options[-1] if q.options else None
+        )
+        if anchor is not None:
+            x0, y0, x1, y1 = anchor.checkbox
             dy = (y1 - y0) or 0.012
             box = (x0, min(0.99, y0 + dy * 1.5), x1, min(1.0, y1 + dy * 1.5))
         else:
             box = (0.1, 0.1, 0.12, 0.111)
-        o = Option(value="新しい選択肢", checkbox=box, marker_type=marker_type)
-        q.options.append(o)
+        o = Option(value=value, checkbox=box, marker_type=marker_type)
+        # 挿入位置: 選択中の選択肢の直後。無ければ末尾。
+        if after is not None and after in q.options:
+            q.options.insert(q.options.index(after) + 1, o)
+        else:
+            q.options.append(o)
         self._populate_keep(o)
 
     def _delete(self) -> None:
