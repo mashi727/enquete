@@ -2836,6 +2836,7 @@ class MainWindowController(QObject):
             lambda qid=question_id, val=value: self._on_box_edited(qid, val)
         )
         self._scene.addItem(item)
+        item.setFocus()  # 矢印キー(移動)/Shift＋矢印(中心固定の拡大縮小)を受け取る
         self._box_edit_item = item
         self._box_edit_target = (question_id, value)
 
@@ -3465,6 +3466,8 @@ class MainWindowController(QObject):
                     hit = self._option_at(sp.x() / w, sp.y() / h)
                     if hit is not None:
                         self._start_box_edit(*hit)
+                        # PDF側へキーボードフォーカスを移し、矢印キーで微調整できるように。
+                        self.pdf_view.setFocus()
                         # 相互参照: フォーム編集の一覧でも同じ選択肢を選択表示する。
                         if self._editor_dialog is not None:
                             self._editor_dialog.select_target(*hit)

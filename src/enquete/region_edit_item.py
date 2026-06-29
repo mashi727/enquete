@@ -22,7 +22,10 @@ class RegionEditItem(QGraphicsObject):
         self._handle = max(1e-3, handle)  # ハンドル一辺(シーン単位)
         self._mode: object | None = None  # 'move' or 0..7(ハンドル番号)
         self._press = QPointF()
+        self._key_step = 2.0  # キーボード操作1回の移動/サイズ変更量(シーン単位)
         self.setAcceptHoverEvents(True)
+        # キーボードで微調整できるようフォーカスを受け取れるようにする。
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsFocusable, True)
         self.setZValue(25)
 
     def rect(self) -> QRectF:
@@ -106,6 +109,33 @@ class RegionEditItem(QGraphicsObject):
     def mouseReleaseEvent(self, event) -> None:  # noqa: ARG002
         self._mode = None
         self.changed.emit()
+
+    def keyPressEvent(self, event) -> None:
+        """矢印キーで移動、Shift＋矢印で中心を保ったまま拡大(右/上)・縮小(左/下)。"""
+        arrows = (
+            Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down,
+        )
+        key = event.key()
+        if key not in arrows:
+            super().keyPressEvent(event)
+            return
+        step = self._key_step
+        r = QRectF(self._rect)
+        if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            # 中心固定の拡大縮小(縦横を等量)。右/上=拡大, 左/下=縮小。
+            grow = step if key in (Qt.Key.Key_Right, Qt.Key.Key_Up) else -step
+            new = r.adjusted(-grow / 2, -grow / 2, grow / 2, grow / 2)
+            if new.width() >= 2.0 and new.height() >= 2.0:  # 最小サイズ保護
+                r = new
+        else:
+            dx = -step if key == Qt.Key.Key_Left else (step if key == Qt.Key.Key_Right else 0)
+            dy = -step if key == Qt.Key.Key_Up else (step if key == Qt.Key.Key_Down else 0)
+            r.translate(dx, dy)
+        self.prepareGeometryChange()
+        self._rect = r.normalized()
+        self.update()
+        self.changed.emit()
+        event.accept()
 
     def hoverMoveEvent(self, event) -> None:
         self.setCursor(self._cursor_at(event.pos()))
