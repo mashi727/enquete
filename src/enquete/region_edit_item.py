@@ -112,7 +112,8 @@ class RegionEditItem(QGraphicsObject):
 
     def keyPressEvent(self, event) -> None:
         """矢印キーで移動。Shift＋矢印は中心を保ったまま、左右=幅・上下=高さを別々に
-        拡大(右/上)・縮小(左/下)する。Ctrl(macOSはCmdも可)同時押しで量を半分(微調整)。"""
+        拡大(右/上)・縮小(左/下)する。Ctrl(macOSはCmdも可)を足すと量が半分になる
+        (Ctrl＋矢印=半量の移動、Shift＋Ctrl＋矢印=半量の拡大縮小)。"""
         arrows = (
             Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down,
         )
@@ -122,8 +123,10 @@ class RegionEditItem(QGraphicsObject):
             return
         mods = event.modifiers()
         step = self._key_step
-        # Ctrl/Cmd 同時押しでさらに半分の細かい調整。
-        if mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier):
+        # Ctrl/Cmd 同時押しで量を半分に(移動・拡大縮小いずれも)。
+        if mods & (
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier
+        ):
             step /= 2
         r = QRectF(self._rect)
         if mods & Qt.KeyboardModifier.ShiftModifier:
