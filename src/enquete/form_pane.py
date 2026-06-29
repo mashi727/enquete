@@ -10,7 +10,7 @@ get_results() で取得する(保存・出力は後工程)。
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QKeyEvent, QMouseEvent, QTextCursor
+from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QPainter, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractButton,
     QButtonGroup,
@@ -101,6 +101,42 @@ from enquete.detect import QuestionResult
 
 # 単一選択で「未選択」を表す特別値
 _NONE_VALUE = "（なし）"
+
+
+class _VResizeGrip(QWidget):
+    """対象ウィジェットの直下に置く、縦ドラッグで高さを変える細い取っ手。"""
+
+    def __init__(self, target: QWidget, min_height: int = 40) -> None:
+        super().__init__()
+        self._target = target
+        self._min = min_height
+        self._press_y: float | None = None
+        self._h0 = 0
+        self.setFixedHeight(8)
+        self.setCursor(Qt.CursorShape.SizeVerCursor)
+        self.setToolTip("ドラッグで自由記述欄の高さを変えられます")
+
+    def paintEvent(self, _event) -> None:
+        p = QPainter(self)
+        p.setPen(QColor(150, 150, 150))
+        cx, cy = self.width() // 2, self.height() // 2
+        for dy in (-2, 1):  # グリップらしい2本線
+            p.drawLine(cx - 14, cy + dy, cx + 14, cy + dy)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        self._press_y = event.globalPosition().y()
+        self._h0 = self._target.height()
+        event.accept()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._press_y is None:
+            return
+        dh = int(event.globalPosition().y() - self._press_y)
+        self._target.setFixedHeight(max(self._min, self._h0 + dh))
+        event.accept()
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: ARG002
+        self._press_y = None
 
 
 class FormPane(QWidget):
@@ -234,8 +270,8 @@ class FormPane(QWidget):
         self._layout_options(q, layout, make)
         self._checks[q.id] = mapping
 
-    # 自由記述(複数行)欄に確保する行数(校正しやすさのため広めに取る)。
-    FREE_TEXT_ROWS = 10
+    # 自由記述(複数行)欄に確保する初期行数(下端ドラッグで可変)。
+    FREE_TEXT_ROWS = 7
 
     @staticmethod
     def _free_text_height(editor: QPlainTextEdit) -> int:
@@ -257,10 +293,12 @@ class FormPane(QWidget):
             editor: QLineEdit | QPlainTextEdit = QPlainTextEdit()
             editor.setFixedHeight(self._free_text_height(editor))
             editor.textChanged.connect(self._emit_changed)
+            layout.addWidget(editor)
+            layout.addWidget(_VResizeGrip(editor))  # 下端ドラッグで高さ可変
         else:
             editor = QLineEdit()
             editor.textChanged.connect(self._emit_changed)
-        layout.addWidget(editor)
+            layout.addWidget(editor)
         self._texts[q.id] = editor
         # フォーカス/ホバーで記入領域をPDF上に示すための登録
         self._text_widgets[editor] = q.id
