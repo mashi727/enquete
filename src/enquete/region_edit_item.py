@@ -23,6 +23,7 @@ class RegionEditItem(QGraphicsObject):
         self._mode: object | None = None  # 'move' or 0..7(ハンドル番号)
         self._press = QPointF()
         self._key_step = 1.0  # キーボード操作1回の移動/サイズ変更量(シーン単位)
+        self._key_fine_step = 0.2  # Ctrl(Cmd)併用時の微調整量(シーン単位)
         self.setAcceptHoverEvents(True)
         # キーボードで微調整できるようフォーカスを受け取れるようにする。
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsFocusable, True)
@@ -112,8 +113,8 @@ class RegionEditItem(QGraphicsObject):
 
     def keyPressEvent(self, event) -> None:
         """矢印キーで移動。Shift＋矢印は中心を保ったまま、左右=幅・上下=高さを別々に
-        拡大(右/上)・縮小(左/下)する。Ctrl(macOSはCmdも可)を足すと量が半分になる
-        (Ctrl＋矢印=半量の移動、Shift＋Ctrl＋矢印=半量の拡大縮小)。"""
+        拡大(右/上)・縮小(左/下)する。Ctrl(macOSはCmdも可)を足すと量が微調整量に
+        なる(Ctrl＋矢印=微小移動、Shift＋Ctrl＋矢印=微小な拡大縮小)。"""
         arrows = (
             Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down,
         )
@@ -123,11 +124,11 @@ class RegionEditItem(QGraphicsObject):
             return
         mods = event.modifiers()
         step = self._key_step
-        # Ctrl/Cmd 同時押しで量を半分に(移動・拡大縮小いずれも)。
+        # Ctrl/Cmd 同時押しで微調整量へ(移動・拡大縮小いずれも)。
         if mods & (
             Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier
         ):
-            step /= 2
+            step = self._key_fine_step
         r = QRectF(self._rect)
         if mods & Qt.KeyboardModifier.ShiftModifier:
             # 中心固定で縦横を別々に。右=幅+ / 左=幅- / 上=高さ+ / 下=高さ-。
