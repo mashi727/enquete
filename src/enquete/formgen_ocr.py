@@ -53,6 +53,10 @@ _PAREN_RE = re.compile(_PAREN)
 _BOX = r"[□☐▢◻◽⬜口ロ]"
 _BOX_RE = re.compile(_BOX)
 _GROUP = re.compile(r"【(.+?)】")
+# 「その他（　）」等: 選択肢ラベル末尾が 空/開きっぱなしの丸括弧 → 自由記述併記の印。
+# スキャンOCRは空欄括弧を「その他（」のように開き括弧だけで返すことが多い。中身に
+# 文字がある括弧(例「X（旧Twitter）」)はラベルなので一致しない。
+_OPT_FILL = re.compile(r"^(?P<base>.+?)[\s　]*[（(][\s　]*[）)]?$")
 # 見出し: 行頭の素の番号(括弧なし) + テキスト
 _HEADER = re.compile(r"^([0-9０-９]{1,2})[\s．.、]*([^\s0-9０-９].*)$")
 _SUBHEADER = re.compile(r"^[○〇●•・◦∙·]\s*(.+?)\s*[：:]\s*(.*)$")
@@ -402,6 +406,33 @@ def generate_survey_from_scans(
                 )
             )
     flush()
+
+    # 「その他（　）」等(チェックボックス＋自由記述併記): 末尾が空括弧の選択肢は、括弧を
+    # 外して選択肢にしたうえで、記入欄を自由記述設問として併設する(記入欄は選択肢の右側に
+    # 概算配置。位置は□位置編集で微調整できる)。ベクタ経路の挙動をスキャン経路でも再現。
+    for q in list(questions):
+        for o in list(q.options):
+            m = _OPT_FILL.match(o.value)
+            if m is None:
+                continue
+            base = m.group("base").strip()
+            if not base:
+                continue
+            o.value = base
+            o.has_text = True
+            x0, y0, x1, y1 = o.checkbox
+            bw = max(0.02, x1 - x0)
+            region = (
+                min(0.90, x1 + bw * 3.0), max(0.0, y0 - 0.004),
+                min(0.99, x1 + bw * 3.0 + 0.22), min(1.0, y1 + 0.004),
+            )
+            seq += 1
+            questions.append(
+                Question(
+                    id=f"q{seq}", label=f"{base}（自由記述）", type=FREE_TEXT,
+                    region=region, multiline=False,
+                )
+            )
 
     title = Path(pdf_paths[0]).stem if pdf_paths else "survey"
     return Survey(
