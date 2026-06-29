@@ -105,6 +105,7 @@ from enquete.schema import (
     Question,
     Rect,
     Survey,
+    survey_from_dict,
     survey_to_dict,
 )
 from enquete import pdf_embed
@@ -1292,9 +1293,26 @@ class MainWindowController(QObject):
     def _obtain_reference_survey(self, genshi_path: str) -> Survey | None:
         """原紙のフォーム定義(初期値)を得る。編集はこの後の原紙表示モードで行う。
 
-        原紙PDFに埋め込み定義があればそれを返す。無ければ原紙を読み取って生成する。
+        原紙の隣にサイドカーJSON(<原紙>.json)があれば最優先で読む(編集済みフォームの
+        再利用)。無ければ原紙PDFの埋め込み定義、それも無ければ原紙を読み取って生成する。
         原紙が読み取れず OCR も使えない場合は、空フォームを返して手編集に委ねる。
         """
+        # (1) 原紙サイドカーJSON: 一度作った原紙フォーム(□位置含む)をそのまま再利用する。
+        sidecar = Path(genshi_path).with_suffix(".json")
+        if sidecar.exists():
+            try:
+                data = json.loads(sidecar.read_text(encoding="utf-8"))
+                raw = data.get("survey", data) if isinstance(data, dict) else None
+                if raw:
+                    survey = survey_from_dict(raw)
+                    sb = self.window.statusBar()
+                    if sb is not None:
+                        sb.showMessage(
+                            f"原紙フォームを {sidecar.name} から読み込みました", 5000
+                        )
+                    return survey
+            except Exception:  # noqa: BLE001  壊れていれば通常の生成へフォールバック
+                pass
         # 原紙が電子データ出力PDF(テキスト層あり=スキャンでない)かを自動判定し、
         # 位置補正での原紙水平化スキップの初期値にする(原紙編集モードで上書き可)。
         is_vector = has_text_layer(genshi_path)
@@ -1391,6 +1409,30 @@ class MainWindowController(QObject):
         self._enter_genshi_edit(
             filled_path, str(temp), self._survey, realign=False, temp_genshi=temp
         )
+
+    def _write_genshi_sidecar(self, genshi_path: str, survey: Survey | None) -> None:
+        """原紙フォーム定義を <原紙>.json として原紙の隣に保存する(再利用用)。
+
+        同じ原紙を次に指定したとき _obtain_reference_survey がこれを読み込み、編集済み
+        フォーム(□位置含む)をそのまま再利用できる。失敗は無視(電子化は継続)。
+        """
+        if survey is None:
+            return
+        try:
+            sidecar = Path(genshi_path).with_suffix(".json")
+            data = {
+                "source_pdf": Path(genshi_path).name,
+                "survey": survey_to_dict(survey),
+            }
+            sidecar.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            sb = self.window.statusBar()
+            if sb is not None:
+                sb.showMessage(f"原紙フォームを {sidecar.name} に保存しました", 5000)
+        except OSError:
+            pass
 
     def _enter_genshi_edit(
         self, filled_path: str, genshi_path: str, survey: Survey,
@@ -1492,7 +1534,9 @@ class MainWindowController(QObject):
             self.doc.close()
             self.doc = None
         if realign:
-            # 初回: 記入済みPDFを原紙基準で位置補正(上書き・.bak退避)→電子化。
+            # 初回: 編集済みフォームを原紙サイドカーJSONへ保存(同じ原紙の再利用用)。
+            self._write_genshi_sidecar(genshi_path, survey)
+            # 記入済みPDFを原紙基準で位置補正(上書き・.bak退避)→電子化。
             level_ref = not (
                 survey is not None and survey.detection.reference_is_vector
             )
