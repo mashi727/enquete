@@ -234,10 +234,28 @@ class FormPane(QWidget):
         self._layout_options(q, layout, make)
         self._checks[q.id] = mapping
 
+    # 自由記述(複数行)欄に確保する行数(校正しやすさのため広めに取る)。
+    FREE_TEXT_ROWS = 10
+
+    @staticmethod
+    def _free_text_height(editor: QPlainTextEdit) -> int:
+        """現在のフォントで FREE_TEXT_ROWS 行ぶんが見える複数行欄の高さ(px)。"""
+        editor.ensurePolished()
+        fm = editor.fontMetrics()
+        frame = 2 * editor.frameWidth()
+        margin = 2 * int(editor.document().documentMargin())
+        return fm.lineSpacing() * FormPane.FREE_TEXT_ROWS + frame + margin + 4
+
+    def relayout_free_text(self) -> None:
+        """フォント変更後に、複数行の自由記述欄の高さを行数基準で再設定する。"""
+        for ed in self._texts.values():
+            if isinstance(ed, QPlainTextEdit):
+                ed.setFixedHeight(self._free_text_height(ed))
+
     def _build_free_text(self, q: Question, layout: QVBoxLayout) -> None:
         if q.multiline:
             editor: QLineEdit | QPlainTextEdit = QPlainTextEdit()
-            editor.setFixedHeight(72)
+            editor.setFixedHeight(self._free_text_height(editor))
             editor.textChanged.connect(self._emit_changed)
         else:
             editor = QLineEdit()

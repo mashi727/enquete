@@ -1970,6 +1970,7 @@ class MainWindowController(QObject):
         self._form_font_pt = pt
         if self.form_pane is not None:
             self.form_pane.setStyleSheet(f"font-size: {pt}pt;")
+            self.form_pane.relayout_free_text()  # 行数基準で高さを再設定
         self._settings.setValue("view/formFontPt", pt)
         self._settings.sync()
         sb = self.window.statusBar()
@@ -1999,6 +2000,7 @@ class MainWindowController(QObject):
         pane.regionRequested.connect(self.start_region_capture)
         self.form_pane = pane
         pane.setStyleSheet(f"font-size: {self._form_font_pt}pt;")
+        pane.relayout_free_text()  # フォント反映後に自由記述欄を行数基準で高さ調整
         # 校正モードでは範囲編集ボタンを無効化(現在のモードを反映)。
         pane.set_region_edit_enabled(not self._proof_mode)
         self._form_scroll.setWidget(pane)
