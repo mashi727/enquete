@@ -21,8 +21,10 @@ jobs:
         include:
           - os: macos-latest
             asset: enquete-macos.zip
+            patch_asset: enquete-patch-macos.zip
           - os: windows-latest
             asset: enquete-windows.exe
+            patch_asset: enquete-patch-windows.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -71,6 +73,23 @@ jobs:
         if: runner.os == 'Windows'
         run: Copy-Item "dist/enquete.exe" "enquete-windows.exe"
 
+      # 年齢・性別 複数選択化パッチ(ドラッグ&ドロップGUI・単体配布)。
+      - name: Build patch tool (macOS)
+        if: runner.os == 'macOS'
+        run: .venv/bin/pyinstaller enquete_patch.spec --noconfirm
+
+      - name: Build patch tool (Windows)
+        if: runner.os == 'Windows'
+        run: .venv\Scripts\pyinstaller.exe enquete_patch.spec --noconfirm
+
+      - name: Package patch tool (macOS)
+        if: runner.os == 'macOS'
+        run: ditto -c -k --keepParent "dist/enquete-patch.app" "enquete-patch-macos.zip"
+
+      - name: Package patch tool (Windows)
+        if: runner.os == 'Windows'
+        run: Copy-Item "dist/enquete-patch.exe" "enquete-patch-windows.exe"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -78,8 +97,17 @@ jobs:
           path: ${{ matrix.asset }}
           if-no-files-found: error
 
+      - name: Upload patch artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.patch_asset }}
+          path: ${{ matrix.patch_asset }}
+          if-no-files-found: error
+
       - name: Attach to Release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.asset }}
+          files: |
+            ${{ matrix.asset }}
+            ${{ matrix.patch_asset }}

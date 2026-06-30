@@ -10,7 +10,7 @@ GitHub Actions（[`.github/workflows/build.yml`](../.github/workflows/build.yml)
 
 - **手動実行**: GitHub の *Actions* → *Build binaries* → *Run workflow*
   → 完了後、各ジョブの *Artifacts* から `enquete-macos.zip` / `enquete-windows.exe` を取得。
-- **リリース**: `v*` タグを push すると同じ生成物が **GitHub Release に添付**されます。
+- **リリース**: `v*` タグを push すると **本体**(`enquete-*`)と **年齢・性別パッチ**(`enquete-patch-*`・ドラッグ&ドロップGUI/`enquete_patch.spec`)が **GitHub Release に添付**されます。
 
 ```bash
 git tag v0.1.25
