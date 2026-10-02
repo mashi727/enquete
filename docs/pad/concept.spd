@@ -1,5 +1,5 @@
 紙のアンケートを、@PDF 1 つで電子化する
-	:comment 問題：紙の回答を手で打ち直している
+	:comment 課題：紙の回答を手で打ち直している
 	:comment 方針：原紙と照合し、人は校正に専念
 	記入済み PDF を開く@$ uv run python -m enquete
 	:if 結果が埋め込み済みか
